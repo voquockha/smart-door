@@ -124,6 +124,12 @@ void FaceEventManager::setAttendanceSuccessCallback(
     attendance_success_callback_ = std::move(callback);
 }
 
+void FaceEventManager::setAttendanceDataCallback(AttendanceDataCallback callback)
+{
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    attendance_data_callback_ = std::move(callback);
+}
+
 void FaceEventManager::onFrame(Frame frame, FaceResult result)
 {
     if (!isValid(result))
@@ -279,12 +285,16 @@ void FaceEventManager::processWorkItem(WorkItem item)
     }
 
     AttendanceSuccessCallback callback;
+    AttendanceDataCallback data_callback;
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
         callback = attendance_success_callback_;
+        data_callback = attendance_data_callback_;
     }
     if (callback)
         callback(item.data.name, item.data.time);
+    if (data_callback)
+        data_callback(item.data, item.data.image_path);
 }
 
 void FaceEventManager::retryQueuedEvents()

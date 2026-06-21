@@ -35,6 +35,9 @@
 #include "face_align.h"
 #include "face_db.h"
 #include "face_event_manager.h"
+#include "face_test_runner.h"
+#include "telegram_client.h"
+#include "attendance_utils.h"
 
 #include "opencv2/core/core.hpp"
 #include "opencv2/highgui/highgui.hpp"
@@ -71,6 +74,24 @@ static inline float confidence_from_face_distance(float dist)
     return std::max(0.0f, std::min(confidence, 1.0f));
 }
 
+static void onAttendanceSuccess(const TelegramClient& telegram,
+                                const AttendanceData& data,
+                                const std::string& image_path)
+{
+    std::string caption;
+    caption.reserve(160);
+    caption += "TransID: ";
+    caption += generateTransID();
+    caption += "\n";
+    caption += u8"Họ và tên: ";
+    caption += data.name;
+    caption += "\n";
+    caption += u8"Có mặt lúc: ";
+    caption += formatTimeForTelegram(data.time);
+
+    telegram.sendPhoto(image_path, caption);
+}
+
 // -------------------------------------------------------------------------
 // Usage
 // -------------------------------------------------------------------------
@@ -81,6 +102,7 @@ static void print_usage(const char *prog)
            " <db_path> <name> <image>\n", prog);
     printf("  Run:      %s run      <retina_model> <facenet_model>"
            " <db_path>\n", prog);
+    printf("  Test:     %s test     [image_dir]\n", prog);
 }
 
 // -------------------------------------------------------------------------
@@ -355,11 +377,17 @@ static int do_run(const char *retina_model_path,
 
     printf("[run] Ready — rtsp://<device>:554/live/0\n");
 
+    TelegramClient telegram;
     FaceEventManager attendance_events;
     attendance_events.setAttendanceSuccessCallback(
         [](const std::string& name, const std::string& time) {
             printf("[attendance] success hook: %s at %s\n",
                    name.c_str(), time.c_str());
+        });
+    attendance_events.setAttendanceDataCallback(
+        [&telegram](const AttendanceData& data,
+                    const std::string& image_path) {
+            onAttendanceSuccess(telegram, data, image_path);
         });
 
     // -----------------------------------------------------------------------
@@ -605,6 +633,29 @@ static int do_run(const char *retina_model_path,
 }
 
 // =========================================================================
+// TEST mode - static image simulation without camera or ML inference
+// =========================================================================
+static int do_test(const char *image_dir)
+{
+    TelegramClient telegram;
+    FaceEventManager attendance_events;
+
+    attendance_events.setAttendanceSuccessCallback(
+        [](const std::string& name, const std::string& time) {
+            printf("[attendance-test] success hook: %s at %s\n",
+                   name.c_str(), time.c_str());
+        });
+    attendance_events.setAttendanceDataCallback(
+        [&telegram](const AttendanceData& data,
+                    const std::string& image_path) {
+            onAttendanceSuccess(telegram, data, image_path);
+        });
+
+    FaceTestRunner runner(&attendance_events);
+    return runner.run(image_dir ? image_dir : "/test_images");
+}
+
+// =========================================================================
 int main(int argc, char *argv[])
 // =========================================================================
 {
@@ -630,6 +681,15 @@ int main(int argc, char *argv[])
             return -1;
         }
         return do_run(argv[2], argv[3], argv[4]);
+    }
+
+    if (strcmp(argv[1], "test") == 0) {
+        // test [image_dir], defaults to /test_images
+        if (argc > 3) {
+            printf("test needs: [image_dir]\n");
+            return -1;
+        }
+        return do_test(argc == 3 ? argv[2] : "/test_images");
     }
 
     print_usage(argv[0]);

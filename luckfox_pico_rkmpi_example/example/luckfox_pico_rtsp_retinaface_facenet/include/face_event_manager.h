@@ -36,10 +36,15 @@ struct AttendanceJson {
     std::string image_path;
 };
 
+using AttendanceData = AttendanceJson;
+
 class FaceEventManager {
 public:
     using AttendanceSuccessCallback =
         std::function<void(const std::string& name, const std::string& time)>;
+    using AttendanceDataCallback =
+        std::function<void(const AttendanceData& data,
+                           const std::string& image_path)>;
 
     FaceEventManager();
     ~FaceEventManager();
@@ -49,6 +54,7 @@ public:
 
     void onFrame(Frame frame, FaceResult result);
     void setAttendanceSuccessCallback(AttendanceSuccessCallback callback);
+    void setAttendanceDataCallback(AttendanceDataCallback callback);
 
 private:
     template <typename T>
@@ -128,6 +134,7 @@ private:
 
     std::mutex callback_mutex_;
     AttendanceSuccessCallback attendance_success_callback_;
+    AttendanceDataCallback attendance_data_callback_;
 };
 
 #endif /* FACE_EVENT_MANAGER_H */
