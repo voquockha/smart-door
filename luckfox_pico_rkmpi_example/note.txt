@@ -1,0 +1,14 @@
+# Đăng ký người thứ nhất
+./luckfox_pico_rtsp_retinaface_facenet register model/retinaface.rknn  model/facenet.rknn face_db.bin "Vo Quoc Kha" model/kha.jpg
+
+# Đăng ký người thứ hai
+./luckfox_pico_rtsp_retinaface_facenet \
+    register model/retinaface.rknn model/facenet.rknn face_db.bin "Tran Thi B" model/b.jpg
+
+# Đăng ký thêm ảnh khác góc cho cùng người → tăng độ chính xác
+./luckfox_pico_rtsp_retinaface_facenet \
+    register model/retinaface.rknn model/facenet.rknn face_db.bin "Nguyen Van A" model/a2.jpg
+
+# Chạy nhận diện
+./luckfox_pico_rtsp_retinaface_facenet \
+    run model/retinaface.rknn model/facenet.rknn face_db.bin
