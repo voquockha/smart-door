@@ -60,6 +60,38 @@ find_package(OpenCV REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+set(LUCKFOX_BUILDROOT_SYSROOT
+    "${SDK_PATH}/sysdrv/source/buildroot/buildroot-2023.02.6/output/host/arm-buildroot-linux-uclibcgnueabihf/sysroot")
+find_path(CURL_INCLUDE_DIR
+          NAMES curl/curl.h
+          PATHS
+              "${LUCKFOX_BUILDROOT_SYSROOT}/usr/include"
+              "${CMAKE_CURRENT_SOURCE_DIR}/include"
+          NO_DEFAULT_PATH)
+find_library(CURL_LIBRARY
+             NAMES curl libcurl
+             PATHS
+                 "${LUCKFOX_BUILDROOT_SYSROOT}/usr/lib"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/lib/${LIBC_TYPE}"
+             NO_DEFAULT_PATH)
+foreach(CURL_DEP ssl crypto z atomic)
+    string(TOUPPER "${CURL_DEP}" CURL_DEP_UPPER)
+    find_library(CURL_${CURL_DEP_UPPER}_LIBRARY
+                 NAMES ${CURL_DEP}
+                 PATHS "${LUCKFOX_BUILDROOT_SYSROOT}/usr/lib"
+                 NO_DEFAULT_PATH)
+    if(CURL_${CURL_DEP_UPPER}_LIBRARY)
+        list(APPEND CURL_EXTRA_LIBS "${CURL_${CURL_DEP_UPPER}_LIBRARY}")
+    endif()
+endforeach()
+if(NOT CURL_INCLUDE_DIR OR NOT CURL_LIBRARY OR NOT CURL_EXTRA_LIBS)
+    message(FATAL_ERROR "libcurl is required for TelegramClient. "
+                        "Missing curl/curl.h, libcurl.so, or curl dependencies")
+endif()
+message(STATUS "Found libcurl include: ${CURL_INCLUDE_DIR}")
+message(STATUS "Found libcurl library: ${CURL_LIBRARY}")
+message(STATUS "Found libcurl deps: ${CURL_EXTRA_LIBS}")
+
 set(SRC_DIR "${EXAMPLE_DIR}/src")
 file(GLOB SRC_FILES "${SRC_DIR}/*.cc")
 add_executable(${PROJECT_NAME} ${SRC_FILES})
@@ -71,6 +103,10 @@ add_compile_options(-g -Wall
                     )
 
 set(CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath-link,${CMAKE_CURRENT_SOURCE_DIR}/lib:/usr/lib")
+if(CURL_LIBRARY)
+    set(CMAKE_EXE_LINKER_FLAGS
+        "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath-link,${LUCKFOX_BUILDROOT_SYSROOT}/usr/lib")
+endif()
 
 if(${LIBC_TYPE} STREQUAL "uclibc")
     target_link_libraries(${PROJECT_NAME}
@@ -84,6 +120,8 @@ if(${LIBC_TYPE} STREQUAL "uclibc")
                         rkaiq
                         pthread
                         rtsp
+                        ${CURL_LIBRARY}
+                        ${CURL_EXTRA_LIBS}
                         rga
                         )
 elseif(${LIBC_TYPE} STREQUAL "glibc")
@@ -103,12 +141,15 @@ elseif(${LIBC_TYPE} STREQUAL "glibc")
                         m
                         rt
                         dl
+                        ${CURL_LIBRARY}
+                        ${CURL_EXTRA_LIBS}
                         rga
                         )
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE                        
                             ${OpenCV_INCLUDE_DIRS}
+                            ${CURL_INCLUDE_DIR}
                             ${EXAMPLE_DIR}/include
                             ${CMAKE_CURRENT_SOURCE_DIR}
                             ${CMAKE_CURRENT_SOURCE_DIR}/utils

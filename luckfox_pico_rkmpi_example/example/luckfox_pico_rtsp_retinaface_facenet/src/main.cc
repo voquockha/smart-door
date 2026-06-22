@@ -102,7 +102,9 @@ static void print_usage(const char *prog)
            " <db_path> <name> <image>\n", prog);
     printf("  Run:      %s run      <retina_model> <facenet_model>"
            " <db_path>\n", prog);
-    printf("  Test:     %s test     [image_dir]\n", prog);
+    printf("  Test:     %s test     <retina_model> <facenet_model>"
+           " <db_path> [image_dir]\n", prog);
+    printf("  Telegram: %s telegram-test [message]\n", prog);
 }
 
 // -------------------------------------------------------------------------
@@ -527,6 +529,7 @@ static int do_run(const char *retina_model_path,
                     event_result.person_id = face_ids[i];
                     event_result.name = face_names[i];
                     event_result.confidence = face_confidences[i];
+                    event_result.distance = face_dists[i];
                     attendance_events.onFrame(Frame(bgr), event_result);
                 }
             }
@@ -633,10 +636,36 @@ static int do_run(const char *retina_model_path,
 }
 
 // =========================================================================
-// TEST mode - static image simulation without camera or ML inference
+// TEST mode - static image recognition without camera
 // =========================================================================
-static int do_test(const char *image_dir)
+static int do_test(const char *retina_model_path,
+                   const char *facenet_model_path,
+                   const char *db_path,
+                   const char *image_dir)
 {
+    face_db_t db;
+    int load_ret = face_db_load(&db, db_path);
+    if (load_ret != 0 || db.count == 0) {
+        printf("[test] DB empty or not found at %s\n", db_path);
+        printf("[test] Register faces first: ./exe register ...\n");
+        return -1;
+    }
+    face_db_print(&db);
+
+    rknn_app_context_t retina_ctx;
+    rknn_app_context_t facenet_ctx;
+    memset(&retina_ctx, 0, sizeof(retina_ctx));
+    memset(&facenet_ctx, 0, sizeof(facenet_ctx));
+
+    int ret = init_retinaface_facenet_model(retina_model_path,
+                                            facenet_model_path,
+                                            &retina_ctx,
+                                            &facenet_ctx);
+    if (ret != 0) {
+        printf("[test] init_retinaface_facenet_model fail ret=%d\n", ret);
+        return -1;
+    }
+
     TelegramClient telegram;
     FaceEventManager attendance_events;
 
@@ -652,7 +681,52 @@ static int do_test(const char *image_dir)
         });
 
     FaceTestRunner runner(&attendance_events);
-    return runner.run(image_dir ? image_dir : "/test_images");
+    int run_ret = runner.run(
+        image_dir ? image_dir : "/test_images",
+        [&db, &retina_ctx, &facenet_ctx](const cv::Mat& image,
+                                         const std::string& image_path,
+                                         FaceResult* result) -> bool {
+            if (!result)
+                return false;
+
+            float embedding[FACE_DB_EMBED_DIM];
+            if (compute_embedding(image, &retina_ctx, &facenet_ctx,
+                                  embedding) != 0) {
+                return false;
+            }
+
+            float dist = 9999.0f;
+            int idx = face_db_find(&db, embedding, &dist);
+            if (idx < 0 || dist >= FACE_DIST_THRESHOLD) {
+                printf("[test] %s -> UNKNOWN dist=%.3f\n",
+                       image_path.c_str(), dist);
+                return false;
+            }
+
+            result->recognized = true;
+            result->person_id.clear();
+            char id_buf[32];
+            snprintf(id_buf, sizeof(id_buf), "user_%03d", idx + 1);
+            result->person_id = id_buf;
+            result->name = db.entries[idx].name;
+            result->distance = dist;
+            result->confidence = confidence_from_face_distance(dist);
+            return true;
+        });
+
+    release_facenet_model(&facenet_ctx);
+    release_retinaface_model(&retina_ctx);
+    return run_ret;
+}
+
+static int do_telegram_test(const char *message)
+{
+    TelegramClient telegram;
+    const char *default_message = "xin chao Vo Quoc Kha";
+    const std::string text = message ? message : default_message;
+
+    printf("[telegram-test] sending message: %s\n", text.c_str());
+    return telegram.sendMessage(text) ? 0 : -1;
 }
 
 // =========================================================================
@@ -684,12 +758,22 @@ int main(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "test") == 0) {
-        // test [image_dir], defaults to /test_images
-        if (argc > 3) {
-            printf("test needs: [image_dir]\n");
+        // test <retina> <facenet> <db> [image_dir], defaults to /test_images
+        if (argc != 5 && argc != 6) {
+            printf("test needs: <retina_model> <facenet_model>"
+                   " <db_path> [image_dir]\n");
             return -1;
         }
-        return do_test(argc == 3 ? argv[2] : "/test_images");
+        return do_test(argv[2], argv[3], argv[4],
+                       argc == 6 ? argv[5] : "/test_images");
+    }
+
+    if (strcmp(argv[1], "telegram-test") == 0) {
+        if (argc > 3) {
+            printf("telegram-test needs: [message]\n");
+            return -1;
+        }
+        return do_telegram_test(argc == 3 ? argv[2] : nullptr);
     }
 
     print_usage(argv[0]);

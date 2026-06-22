@@ -93,18 +93,29 @@ void FaceEventManager::ThreadSafeQueue<T>::shutdown()
 FaceEventManager::FaceEventManager()
     : confidence_threshold_(kDefaultConfidenceThreshold),
       cooldown_seconds_(kDefaultCooldownSeconds),
-      base_dir_(getEnvOrDefault("ATTENDANCE_BASE_DIR", "/data/attendance")),
+      requested_base_dir_(
+          getEnvOrDefault("ATTENDANCE_BASE_DIR", "/data/attendance")),
+      effective_base_dir_(requested_base_dir_),
       camera_id_(getEnvOrDefault("ATTENDANCE_CAMERA_ID", "cam_01")),
       server_host_(getEnvOrDefault("ATTENDANCE_SERVER_HOST", "127.0.0.1")),
       server_port_(atoi(getEnvOrDefault("ATTENDANCE_SERVER_PORT",
                                         "8080").c_str())),
       server_path_(getEnvOrDefault("ATTENDANCE_SERVER_PATH", "/attendance")),
-      queue_dir_(joinPath(base_dir_, "queue")),
-      queue_path_(joinPath(queue_dir_, "attendance_queue.jsonl")),
       work_queue_(kDefaultQueueCapacity),
       running_(true)
 {
-    ensureDirectory(base_dir_);
+    if (!ensureDirectory(requested_base_dir_) ||
+        !isDirectoryWritable(requested_base_dir_)) {
+        effective_base_dir_ = "/tmp/attendance";
+        printf("[attendance] storage fallback: %s -> %s\n",
+               requested_base_dir_.c_str(), effective_base_dir_.c_str());
+        ensureDirectory(effective_base_dir_);
+    } else {
+        printf("[attendance] storage dir: %s\n", effective_base_dir_.c_str());
+    }
+
+    queue_dir_ = joinPath(effective_base_dir_, "queue");
+    queue_path_ = joinPath(queue_dir_, "attendance_queue.jsonl");
     ensureDirectory(queue_dir_);
     worker_ = std::thread(&FaceEventManager::workerLoop, this);
 }
@@ -184,9 +195,10 @@ void FaceEventManager::handleEvent(Frame frame, FaceResult r)
     data.name = r.name;
     data.time = nowTime();
     data.confidence = r.confidence;
+    data.distance = r.distance;
     data.camera_id = camera_id_;
 
-    const std::string date_dir = joinPath(base_dir_, nowDate());
+    const std::string date_dir = joinPath(effective_base_dir_, nowDate());
     const std::string basename =
         sanitizeFilename(r.name) + "_" + compactTime(data.time);
 
@@ -207,11 +219,11 @@ void FaceEventManager::handleEvent(Frame frame, FaceResult r)
     markCooldown(r.person_id);
 }
 
-void FaceEventManager::saveImage(Frame frame, std::string path)
+bool FaceEventManager::saveImage(Frame frame, std::string path)
 {
     if (frame.image_bgr.empty()) {
         printf("[attendance] Cannot save empty image: %s\n", path.c_str());
-        return;
+        return false;
     }
 
     std::vector<int> params;
@@ -221,18 +233,27 @@ void FaceEventManager::saveImage(Frame frame, std::string path)
     try {
         if (!cv::imwrite(path, frame.image_bgr, params)) {
             printf("[attendance] Failed to write image: %s\n", path.c_str());
+            return false;
         }
     } catch (const cv::Exception& e) {
         printf("[attendance] OpenCV image write error for %s: %s\n",
                path.c_str(), e.what());
+        return false;
     }
+
+    printf("[attendance] Image saved: %s\n", path.c_str());
+    return true;
 }
 
-void FaceEventManager::saveMetadata(AttendanceJson data, std::string path)
+bool FaceEventManager::saveMetadata(AttendanceJson data, std::string path)
 {
     if (!writeTextFile(path, metadataJson(data))) {
         printf("[attendance] Failed to write metadata: %s\n", path.c_str());
+        return false;
     }
+
+    printf("[attendance] Metadata saved: %s\n", path.c_str());
+    return true;
 }
 
 bool FaceEventManager::sendToServer(AttendanceJson data)
@@ -270,9 +291,38 @@ void FaceEventManager::processWorkItem(WorkItem item)
 {
     const std::string date_dir = item.metadata_path.substr(
         0, item.metadata_path.find_last_of('/'));
-    ensureDirectory(date_dir);
+    if (!ensureDirectory(date_dir) || !isDirectoryWritable(date_dir)) {
+        const std::string fallback_base = "/tmp/attendance";
+        const std::string fallback_dir = joinPath(fallback_base, nowDate());
+        const std::string image_name = item.data.image_path.substr(
+            item.data.image_path.find_last_of('/') + 1);
+        const std::string json_name = item.metadata_path.substr(
+            item.metadata_path.find_last_of('/') + 1);
 
-    saveImage(Frame(item.image_bgr), item.data.image_path);
+        ensureDirectory(fallback_dir);
+        printf("[attendance] event dir not writable, fallback: %s -> %s\n",
+               date_dir.c_str(), fallback_dir.c_str());
+        item.data.image_path = joinPath(fallback_dir, image_name);
+        item.metadata_path = joinPath(fallback_dir, json_name);
+        item.post_payload = postJson(item.data);
+    }
+
+    bool image_saved = saveImage(Frame(item.image_bgr), item.data.image_path);
+    if (!image_saved) {
+        const std::string fallback_base = "/tmp/attendance";
+        const std::string fallback_dir = joinPath(fallback_base, nowDate());
+        const std::string image_name = item.data.image_path.substr(
+            item.data.image_path.find_last_of('/') + 1);
+        const std::string json_name = item.metadata_path.substr(
+            item.metadata_path.find_last_of('/') + 1);
+
+        ensureDirectory(fallback_dir);
+        printf("[attendance] image save fallback: %s\n", fallback_dir.c_str());
+        item.data.image_path = joinPath(fallback_dir, image_name);
+        item.metadata_path = joinPath(fallback_dir, json_name);
+        item.post_payload = postJson(item.data);
+        image_saved = saveImage(Frame(item.image_bgr), item.data.image_path);
+    }
     saveMetadata(item.data, item.metadata_path);
 
     if (!sendToServer(item.data)) {
@@ -293,8 +343,10 @@ void FaceEventManager::processWorkItem(WorkItem item)
     }
     if (callback)
         callback(item.data.name, item.data.time);
-    if (data_callback)
+    if (data_callback && image_saved)
         data_callback(item.data, item.data.image_path);
+    else if (data_callback)
+        printf("[attendance] Skip image callback because evidence image was not saved\n");
 }
 
 void FaceEventManager::retryQueuedEvents()
@@ -500,6 +552,7 @@ std::string FaceEventManager::metadataJson(const AttendanceJson& data)
     out << "  \"name\": \"" << jsonEscape(data.name) << "\",\n";
     out << "  \"time\": \"" << jsonEscape(data.time) << "\",\n";
     out << "  \"confidence\": " << data.confidence << ",\n";
+    out << "  \"distance\": " << data.distance << ",\n";
     out << "  \"camera_id\": \"" << jsonEscape(data.camera_id) << "\",\n";
     out << "  \"image_path\": \"" << jsonEscape(data.image_path) << "\"\n";
     out << "}\n";
@@ -515,6 +568,7 @@ std::string FaceEventManager::postJson(const AttendanceJson& data)
     out << "\"name\":\"" << jsonEscape(data.name) << "\",";
     out << "\"time\":\"" << jsonEscape(data.time) << "\",";
     out << "\"confidence\":" << data.confidence << ",";
+    out << "\"distance\":" << data.distance << ",";
     out << "\"image_path\":\"" << jsonEscape(data.image_path) << "\"";
     out << "}";
     return out.str();
@@ -528,6 +582,15 @@ bool FaceEventManager::writeTextFile(const std::string& path,
         return false;
     out << content;
     return out.good();
+}
+
+bool FaceEventManager::isDirectoryWritable(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    if (access(path.c_str(), W_OK) == 0)
+        return true;
+    return false;
 }
 
 bool FaceEventManager::httpPost(const std::string& host,

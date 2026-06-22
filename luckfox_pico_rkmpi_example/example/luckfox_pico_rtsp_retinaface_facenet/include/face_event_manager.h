@@ -25,6 +25,7 @@ struct FaceResult {
     std::string person_id;
     std::string name;
     float confidence = 0.0f;
+    float distance = -1.0f;
 };
 
 struct AttendanceJson {
@@ -32,6 +33,7 @@ struct AttendanceJson {
     std::string name;
     std::string time;
     float confidence = 0.0f;
+    float distance = -1.0f;
     std::string camera_id;
     std::string image_path;
 };
@@ -86,8 +88,8 @@ private:
     void markCooldown(std::string person_id);
     void handleEvent(Frame frame, FaceResult r);
 
-    void saveImage(Frame frame, std::string path);
-    void saveMetadata(AttendanceJson data, std::string path);
+    bool saveImage(Frame frame, std::string path);
+    bool saveMetadata(AttendanceJson data, std::string path);
     bool sendToServer(AttendanceJson data);
 
     void workerLoop();
@@ -109,6 +111,7 @@ private:
     static std::string postJson(const AttendanceJson& data);
     static bool writeTextFile(const std::string& path,
                               const std::string& content);
+    static bool isDirectoryWritable(const std::string& path);
     static bool httpPost(const std::string& host,
                          int port,
                          const std::string& path,
@@ -117,13 +120,14 @@ private:
 
     const float confidence_threshold_;
     const int cooldown_seconds_;
-    const std::string base_dir_;
+    const std::string requested_base_dir_;
+    std::string effective_base_dir_;
     const std::string camera_id_;
     const std::string server_host_;
     const int server_port_;
     const std::string server_path_;
-    const std::string queue_dir_;
-    const std::string queue_path_;
+    std::string queue_dir_;
+    std::string queue_path_;
 
     ThreadSafeQueue<WorkItem> work_queue_;
     std::thread worker_;
