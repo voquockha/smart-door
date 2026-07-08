@@ -86,28 +86,36 @@ bool logCurlResult(const char* op,
 TelegramClient::TelegramClient()
     : bot_token_(getEnvOrDefault("TELEGRAM_BOT_TOKEN", "")),
       chat_id_(getEnvOrDefault("TELEGRAM_CHAT_ID", "")),
+      message_thread_id_(getEnvOrDefault(
+          "TELEGRAM_MESSAGE_THREAD_ID",
+          getEnvOrDefault("TELEGRAM_TOPIC_ID", ""))),
       allow_insecure_(getEnvBool("TELEGRAM_ALLOW_INSECURE", false))
 {
     std::call_once(g_curl_init_once, []() {
         curl_global_init(CURL_GLOBAL_DEFAULT);
     });
 
-    printf("[telegram] init token=%s chat_id=%s allow_insecure=%s transport=libcurl/%s\n",
+    printf("[telegram] init token=%s chat_id=%s topic_id=%s allow_insecure=%s transport=libcurl/%s\n",
            maskToken(bot_token_).c_str(), maskId(chat_id_).c_str(),
+           maskId(message_thread_id_).c_str(),
            allow_insecure_ ? "true" : "false", curl_version());
 }
 
 TelegramClient::TelegramClient(std::string bot_token, std::string chat_id)
     : bot_token_(std::move(bot_token)),
       chat_id_(std::move(chat_id)),
+      message_thread_id_(getEnvOrDefault(
+          "TELEGRAM_MESSAGE_THREAD_ID",
+          getEnvOrDefault("TELEGRAM_TOPIC_ID", ""))),
       allow_insecure_(getEnvBool("TELEGRAM_ALLOW_INSECURE", false))
 {
     std::call_once(g_curl_init_once, []() {
         curl_global_init(CURL_GLOBAL_DEFAULT);
     });
 
-    printf("[telegram] init token=%s chat_id=%s allow_insecure=%s transport=libcurl/%s\n",
+    printf("[telegram] init token=%s chat_id=%s topic_id=%s allow_insecure=%s transport=libcurl/%s\n",
            maskToken(bot_token_).c_str(), maskId(chat_id_).c_str(),
+           maskId(message_thread_id_).c_str(),
            allow_insecure_ ? "true" : "false", curl_version());
 }
 
@@ -126,14 +134,15 @@ bool TelegramClient::sendMessage(const std::string& text) const
     const std::string url =
         "https://api.telegram.org/bot" + bot_token_ + "/sendMessage";
 
-    printf("[telegram] sendMessage start text_len=%zu token=%s chat_id=%s\n",
+    printf("[telegram] sendMessage start text_len=%zu token=%s chat_id=%s topic_id=%s\n",
            text.size(), maskToken(bot_token_).c_str(),
-           maskId(chat_id_).c_str());
+           maskId(chat_id_).c_str(), maskId(message_thread_id_).c_str());
 
     for (int attempt = 1; attempt <= kTelegramRetryCount; ++attempt) {
         printf("[telegram] sendMessage attempt %d/%d via libcurl\n",
                attempt, kTelegramRetryCount);
-        if (postMessage(url, chat_id_, text, allow_insecure_))
+        if (postMessage(url, chat_id_, message_thread_id_, text,
+                        allow_insecure_))
             return true;
 
         sleep((unsigned int)attempt);
@@ -158,14 +167,15 @@ bool TelegramClient::sendPhoto(const std::string& image_path,
     const std::string url =
         "https://api.telegram.org/bot" + bot_token_ + "/sendPhoto";
 
-    printf("[telegram] sendPhoto start image=%s caption_len=%zu token=%s chat_id=%s\n",
+    printf("[telegram] sendPhoto start image=%s caption_len=%zu token=%s chat_id=%s topic_id=%s\n",
            image_path.c_str(), caption.size(), maskToken(bot_token_).c_str(),
-           maskId(chat_id_).c_str());
+           maskId(chat_id_).c_str(), maskId(message_thread_id_).c_str());
 
     for (int attempt = 1; attempt <= kTelegramRetryCount; ++attempt) {
         printf("[telegram] sendPhoto attempt %d/%d via libcurl\n",
                attempt, kTelegramRetryCount);
-        if (postPhoto(url, chat_id_, image_path, caption, allow_insecure_))
+        if (postPhoto(url, chat_id_, message_thread_id_, image_path, caption,
+                      allow_insecure_))
             return true;
 
         sleep((unsigned int)attempt);
@@ -224,6 +234,7 @@ bool TelegramClient::fileExists(const std::string& path)
 
 bool TelegramClient::postMessage(const std::string& url,
                                  const std::string& chat_id,
+                                 const std::string& message_thread_id,
                                  const std::string& text,
                                  bool allow_insecure)
 {
@@ -237,21 +248,32 @@ bool TelegramClient::postMessage(const std::string& url,
     configureCommonCurl(curl, url, allow_insecure, &response);
 
     char* chat_escaped = curl_easy_escape(curl, chat_id.c_str(), 0);
+    char* thread_escaped = message_thread_id.empty()
+                               ? nullptr
+                               : curl_easy_escape(
+                                     curl, message_thread_id.c_str(), 0);
     char* text_escaped = curl_easy_escape(curl, text.c_str(), 0);
-    if (!chat_escaped || !text_escaped) {
+    if (!chat_escaped || (!message_thread_id.empty() && !thread_escaped) ||
+        !text_escaped) {
         printf("[telegram] curl_easy_escape failed\n");
         if (chat_escaped)
             curl_free(chat_escaped);
+        if (thread_escaped)
+            curl_free(thread_escaped);
         if (text_escaped)
             curl_free(text_escaped);
         curl_easy_cleanup(curl);
         return false;
     }
 
-    const std::string fields =
+    std::string fields =
         "chat_id=" + std::string(chat_escaped) +
         "&text=" + std::string(text_escaped);
+    if (thread_escaped)
+        fields += "&message_thread_id=" + std::string(thread_escaped);
     curl_free(chat_escaped);
+    if (thread_escaped)
+        curl_free(thread_escaped);
     curl_free(text_escaped);
 
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -273,6 +295,7 @@ bool TelegramClient::postMessage(const std::string& url,
 
 bool TelegramClient::postPhoto(const std::string& url,
                                const std::string& chat_id,
+                               const std::string& message_thread_id,
                                const std::string& image_path,
                                const std::string& caption,
                                bool allow_insecure)
@@ -296,6 +319,12 @@ bool TelegramClient::postPhoto(const std::string& url,
     curl_mimepart* part = curl_mime_addpart(mime);
     curl_mime_name(part, "chat_id");
     curl_mime_data(part, chat_id.c_str(), CURL_ZERO_TERMINATED);
+
+    if (!message_thread_id.empty()) {
+        part = curl_mime_addpart(mime);
+        curl_mime_name(part, "message_thread_id");
+        curl_mime_data(part, message_thread_id.c_str(), CURL_ZERO_TERMINATED);
+    }
 
     part = curl_mime_addpart(mime);
     curl_mime_name(part, "caption");

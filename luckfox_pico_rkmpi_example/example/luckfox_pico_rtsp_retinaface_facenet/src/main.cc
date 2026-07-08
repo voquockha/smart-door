@@ -11,6 +11,10 @@
 // Set USE_FACE_ALIGNMENT to 1 (default) to use 5-point landmark alignment
 // before MobileFaceNet, or 0 to fall back to bounding-box letterbox crop.
 
+//export TELEGRAM_BOT_TOKEN="8889721857:AAG3lbVpMTq0Tc2Cli-evuRMjWAGbwN7jrA"
+//export TELEGRAM_CHAT_ID="1074873491"
+//export TELEGRAM_ALLOW_INSECURE=1
+
 #define USE_FACE_ALIGNMENT 1
 
 #include <assert.h>

@@ -22,16 +22,19 @@ private:
     static bool fileExists(const std::string& path);
     static bool postMessage(const std::string& url,
                             const std::string& chat_id,
+                            const std::string& message_thread_id,
                             const std::string& text,
                             bool allow_insecure);
     static bool postPhoto(const std::string& url,
                           const std::string& chat_id,
+                          const std::string& message_thread_id,
                           const std::string& image_path,
                           const std::string& caption,
                           bool allow_insecure);
 
     std::string bot_token_;
     std::string chat_id_;
+    std::string message_thread_id_;
     bool allow_insecure_;
 };
 

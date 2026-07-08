@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
 
 namespace {
 constexpr float kDefaultConfidenceThreshold = 0.80f;
@@ -230,8 +231,16 @@ bool FaceEventManager::saveImage(Frame frame, std::string path)
     params.push_back(cv::IMWRITE_JPEG_QUALITY);
     params.push_back(90);
 
+    cv::Mat image_for_jpeg;
+    if (frame.image_bgr.channels() == 3) {
+        // RTSP receives RGB bytes; OpenCV JPEG encoding expects BGR bytes.
+        cv::cvtColor(frame.image_bgr, image_for_jpeg, cv::COLOR_RGB2BGR);
+    } else {
+        image_for_jpeg = frame.image_bgr;
+    }
+
     try {
-        if (!cv::imwrite(path, frame.image_bgr, params)) {
+        if (!cv::imwrite(path, image_for_jpeg, params)) {
             printf("[attendance] Failed to write image: %s\n", path.c_str());
             return false;
         }
