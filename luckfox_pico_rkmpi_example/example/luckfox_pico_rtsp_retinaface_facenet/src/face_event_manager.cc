@@ -102,6 +102,7 @@ FaceEventManager::FaceEventManager()
       server_port_(atoi(getEnvOrDefault("ATTENDANCE_SERVER_PORT",
                                         "8080").c_str())),
       server_path_(getEnvOrDefault("ATTENDANCE_SERVER_PATH", "/attendance")),
+      save_images_(getEnvBool("ATTENDANCE_SAVE_IMAGE", true)),
       work_queue_(kDefaultQueueCapacity),
       running_(true)
 {
@@ -203,7 +204,7 @@ void FaceEventManager::handleEvent(Frame frame, FaceResult r)
     const std::string basename =
         sanitizeFilename(r.name) + "_" + compactTime(data.time);
 
-    data.image_path = joinPath(date_dir, basename + ".jpg");
+    data.image_path = joinPath(date_dir, basename + ".bmp");
 
     WorkItem item;
     item.image_bgr = frame.image_bgr.clone();
@@ -227,26 +228,20 @@ bool FaceEventManager::saveImage(Frame frame, std::string path)
         return false;
     }
 
-    std::vector<int> params;
-    params.push_back(cv::IMWRITE_JPEG_QUALITY);
-    params.push_back(90);
-
-    cv::Mat image_for_jpeg;
+    cv::Mat image_for_bmp;
     if (frame.image_bgr.channels() == 3) {
-        // RTSP receives RGB bytes; OpenCV JPEG encoding expects BGR bytes.
-        cv::cvtColor(frame.image_bgr, image_for_jpeg, cv::COLOR_RGB2BGR);
+        // RTSP receives RGB bytes; BMP stores pixels in BGR order.
+        cv::cvtColor(frame.image_bgr, image_for_bmp, cv::COLOR_RGB2BGR);
+    } else if (frame.image_bgr.channels() == 1) {
+        cv::cvtColor(frame.image_bgr, image_for_bmp, cv::COLOR_GRAY2BGR);
     } else {
-        image_for_jpeg = frame.image_bgr;
+        printf("[attendance] Unsupported image channels=%d for BMP: %s\n",
+               frame.image_bgr.channels(), path.c_str());
+        return false;
     }
 
-    try {
-        if (!cv::imwrite(path, image_for_jpeg, params)) {
-            printf("[attendance] Failed to write image: %s\n", path.c_str());
-            return false;
-        }
-    } catch (const cv::Exception& e) {
-        printf("[attendance] OpenCV image write error for %s: %s\n",
-               path.c_str(), e.what());
+    if (!writeBmpFile(path, image_for_bmp)) {
+        printf("[attendance] Failed to write BMP image: %s\n", path.c_str());
         return false;
     }
 
@@ -316,8 +311,15 @@ void FaceEventManager::processWorkItem(WorkItem item)
         item.post_payload = postJson(item.data);
     }
 
-    bool image_saved = saveImage(Frame(item.image_bgr), item.data.image_path);
-    if (!image_saved) {
+    bool image_saved = false;
+    if (save_images_) {
+        image_saved = saveImage(Frame(item.image_bgr), item.data.image_path);
+    } else {
+        printf("[attendance] ATTENDANCE_SAVE_IMAGE=0, skip evidence image for %s\n",
+               item.data.name.c_str());
+    }
+
+    if (save_images_ && !image_saved) {
         const std::string fallback_base = "/tmp/attendance";
         const std::string fallback_dir = joinPath(fallback_base, nowDate());
         const std::string image_name = item.data.image_path.substr(
@@ -416,6 +418,18 @@ std::string FaceEventManager::getEnvOrDefault(const char* name,
     if (!value || value[0] == '\0')
         return fallback;
     return value;
+}
+
+bool FaceEventManager::getEnvBool(const char* name, bool fallback)
+{
+    const char* value = getenv(name);
+    if (!value || value[0] == '\0')
+        return fallback;
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "TRUE") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "YES") == 0;
 }
 
 std::string FaceEventManager::nowDate()
@@ -591,6 +605,66 @@ bool FaceEventManager::writeTextFile(const std::string& path,
         return false;
     out << content;
     return out.good();
+}
+
+bool FaceEventManager::writeBmpFile(const std::string& path,
+                                    const cv::Mat& image)
+{
+    if (image.empty() || image.channels() != 3 || image.depth() != CV_8U)
+        return false;
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+
+    const int width = image.cols;
+    const int height = image.rows;
+    const int row_stride = ((width * 3 + 3) / 4) * 4;
+    const int pixel_data_size = row_stride * height;
+    const int file_size = 14 + 40 + pixel_data_size;
+
+    unsigned char file_header[14] = {
+        'B', 'M',
+        (unsigned char)(file_size),
+        (unsigned char)(file_size >> 8),
+        (unsigned char)(file_size >> 16),
+        (unsigned char)(file_size >> 24),
+        0, 0, 0, 0,
+        54, 0, 0, 0
+    };
+
+    unsigned char info_header[40];
+    memset(info_header, 0, sizeof(info_header));
+    info_header[0] = 40;
+    info_header[4] = (unsigned char)(width);
+    info_header[5] = (unsigned char)(width >> 8);
+    info_header[6] = (unsigned char)(width >> 16);
+    info_header[7] = (unsigned char)(width >> 24);
+    info_header[8] = (unsigned char)(height);
+    info_header[9] = (unsigned char)(height >> 8);
+    info_header[10] = (unsigned char)(height >> 16);
+    info_header[11] = (unsigned char)(height >> 24);
+    info_header[12] = 1;
+    info_header[14] = 24;
+    info_header[20] = (unsigned char)(pixel_data_size);
+    info_header[21] = (unsigned char)(pixel_data_size >> 8);
+    info_header[22] = (unsigned char)(pixel_data_size >> 16);
+    info_header[23] = (unsigned char)(pixel_data_size >> 24);
+
+    bool ok = fwrite(file_header, 1, sizeof(file_header), f) ==
+              sizeof(file_header);
+    ok = ok && fwrite(info_header, 1, sizeof(info_header), f) ==
+                 sizeof(info_header);
+
+    std::vector<unsigned char> row((size_t)row_stride, 0);
+    for (int y = height - 1; ok && y >= 0; --y) {
+        const unsigned char* src = image.ptr<unsigned char>(y);
+        memcpy(row.data(), src, (size_t)width * 3);
+        ok = fwrite(row.data(), 1, row.size(), f) == row.size();
+    }
+
+    fclose(f);
+    return ok;
 }
 
 bool FaceEventManager::isDirectoryWritable(const std::string& path)

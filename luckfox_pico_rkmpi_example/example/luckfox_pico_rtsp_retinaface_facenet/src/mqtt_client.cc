@@ -188,6 +188,18 @@ std::string extractJsonObject(const std::string& json, const std::string& key)
     return "";
 }
 
+std::string fileExtensionLower(const std::string& path)
+{
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= path.size())
+        return "";
+    std::string ext = path.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return (char)std::tolower(c);
+    });
+    return ext;
+}
+
 }  // namespace
 
 MqttClient::MqttClient()
@@ -838,7 +850,7 @@ std::string MqttClient::buildRecognitionEvent(
         out << "\"capture_time\":\"" << jsonEscape(nowIsoUtc()) << "\",";
         out << "\"image\":{";
         out << "\"type\":\"" << (include_image_base64_ ? "base64" : "path") << "\",";
-        out << "\"format\":\"jpg\",";
+        out << "\"format\":\"" << jsonEscape(fileExtensionLower(payload.image_path)) << "\",";
         out << "\"content\":\""
             << jsonEscape(include_image_base64_ ? image_base64
                                                 : payload.image_path)

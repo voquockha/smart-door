@@ -99,6 +99,7 @@ private:
 
     static std::string getEnvOrDefault(const char* name,
                                        const std::string& fallback);
+    static bool getEnvBool(const char* name, bool fallback);
     static std::string nowDate();
     static std::string nowTime();
     static std::string compactTime(const std::string& timestamp);
@@ -111,6 +112,7 @@ private:
     static std::string postJson(const AttendanceJson& data);
     static bool writeTextFile(const std::string& path,
                               const std::string& content);
+    static bool writeBmpFile(const std::string& path, const cv::Mat& image);
     static bool isDirectoryWritable(const std::string& path);
     static bool httpPost(const std::string& host,
                          int port,
@@ -126,6 +128,7 @@ private:
     const std::string server_host_;
     const int server_port_;
     const std::string server_path_;
+    const bool save_images_;
     std::string queue_dir_;
     std::string queue_path_;
 

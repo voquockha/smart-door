@@ -16,6 +16,8 @@ Code hiện tại đã hỗ trợ:
   `uuid`, `timestamp`, `device_id`, `command`, `message`, `status`, `data`.
 - Khi nhận diện thành công, gửi event qua MQTT topic khác.
 - Event có thể kèm ảnh dạng base64.
+- Ảnh evidence hiện lưu dạng `.bmp` bằng writer phần mềm để tránh crash
+  `opencv-mobile HW JPG encoder with rk mpp` khi pipeline RTSP/VENC đang chạy.
 - Flow provisioning thiết bị khi bật `MQTT_PROVISIONING_ENABLED=1`:
   `register_device`, `WAITING_USER_APPROVAL`, `check_register_status`,
   `DEVICE_APPROVED`, lưu credential và chuyển sang topic production.
@@ -250,7 +252,7 @@ Payload hiện tại:
   "message": "recognition success",
   "status": true,
   "data": {
-    "face_link": "/data/attendance/2026-07-09/NguyenVanA_144000.jpg",
+    "face_link": "/data/attendance/2026-07-09/NguyenVanA_144000.bmp",
     "name": "Nguyen Van A",
     "person_id": "user_001",
     "time": "2026-07-09 14:40:00",
@@ -268,6 +270,10 @@ export MQTT_INCLUDE_IMAGE_BASE64=0
 ```
 
 Khi đó MQTT chỉ gửi `face_link` là path ảnh đã lưu trên thiết bị.
+
+Ghi chú: trước đây ảnh evidence lưu `.jpg` bằng `cv::imwrite`, nhưng trên
+LuckFox bản OpenCV mobile dùng MPP JPEG encoder và có thể crash khi đang chạy
+VENC/RTSP. Vì vậy code hiện tại lưu `.bmp` để ổn định trước.
 
 ## 9. Kiểm tra dữ liệu đã đăng ký
 
@@ -710,7 +716,7 @@ Payload event mục tiêu:
     "capture_time": "2026-07-09T14:40:00Z",
     "image": {
       "type": "base64",
-      "format": "jpg",
+      "format": "bmp",
       "content": "base64_image_here"
     }
   }

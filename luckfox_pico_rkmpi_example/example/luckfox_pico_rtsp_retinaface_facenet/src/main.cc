@@ -448,9 +448,12 @@ static int do_run(const char *retina_model_path,
     // VENC frame buffer
     // -----------------------------------------------------------------------
     VENC_STREAM_S stFrame;
+    memset(&stFrame, 0, sizeof(stFrame));
     stFrame.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
+    memset(stFrame.pstPack, 0, sizeof(VENC_PACK_S));
     RK_U32 H264_TimeRef = 0;
     VIDEO_FRAME_INFO_S stViFrame;
+    memset(&stViFrame, 0, sizeof(stViFrame));
     RK_S32 s32Ret = 0;
 
     MB_POOL_CONFIG_S PoolCfg;
@@ -610,6 +613,7 @@ static int do_run(const char *retina_model_path,
         h264_frame.stVFrame.u64PTS     = TEST_COMM_GetNowUs();
 
         s32Ret = RK_MPI_VI_GetChnFrame(0, 0, &stViFrame, -1);
+        bool got_vi_frame = (s32Ret == RK_SUCCESS);
         if (s32Ret == RK_SUCCESS) {
             void *vi_data = RK_MPI_MB_Handle2VirAddr(stViFrame.stVFrame.pMbBlk);
 
@@ -804,28 +808,42 @@ static int do_run(const char *retina_model_path,
                    align_us, facenet_us,
                    ts_diff_us(t_frame_start, t_end),
                    od_results.count);
+        } else {
+            RK_LOGE("RK_MPI_VI_GetChnFrame fail %x", s32Ret);
         }
 
-        // Encode H264
-        RK_MPI_VENC_SendFrame(0, &h264_frame, -1);
+        if (got_vi_frame) {
+            // Encode H264 only for a valid captured frame.
+            s32Ret = RK_MPI_VENC_SendFrame(0, &h264_frame, -1);
+            if (s32Ret != RK_SUCCESS)
+                RK_LOGE("RK_MPI_VENC_SendFrame fail %x", s32Ret);
 
-        // RTSP transmit
-        s32Ret = RK_MPI_VENC_GetStream(0, &stFrame, -1);
-        if (s32Ret == RK_SUCCESS && g_rtsplive && g_rtsp_session) {
-            void *pData = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
-            rtsp_tx_video(g_rtsp_session,
-                          (uint8_t *)pData, stFrame.pstPack->u32Len,
-                          stFrame.pstPack->u64PTS);
-            rtsp_do_event(g_rtsplive);
+            bool got_venc_stream = false;
+            if (s32Ret == RK_SUCCESS) {
+                memset(stFrame.pstPack, 0, sizeof(VENC_PACK_S));
+                s32Ret = RK_MPI_VENC_GetStream(0, &stFrame, -1);
+                got_venc_stream = (s32Ret == RK_SUCCESS);
+                if (got_venc_stream && g_rtsplive && g_rtsp_session) {
+                    void *pData = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
+                    rtsp_tx_video(g_rtsp_session,
+                                  (uint8_t *)pData, stFrame.pstPack->u32Len,
+                                  stFrame.pstPack->u64PTS);
+                    rtsp_do_event(g_rtsplive);
+                } else if (!got_venc_stream) {
+                    RK_LOGE("RK_MPI_VENC_GetStream fail %x", s32Ret);
+                }
+            }
+
+            s32Ret = RK_MPI_VI_ReleaseChnFrame(0, 0, &stViFrame);
+            if (s32Ret != RK_SUCCESS)
+                RK_LOGE("RK_MPI_VI_ReleaseChnFrame fail %x", s32Ret);
+
+            if (got_venc_stream) {
+                s32Ret = RK_MPI_VENC_ReleaseStream(0, &stFrame);
+                if (s32Ret != RK_SUCCESS)
+                    RK_LOGE("RK_MPI_VENC_ReleaseStream fail %x", s32Ret);
+            }
         }
-
-        s32Ret = RK_MPI_VI_ReleaseChnFrame(0, 0, &stViFrame);
-        if (s32Ret != RK_SUCCESS)
-            RK_LOGE("RK_MPI_VI_ReleaseChnFrame fail %x", s32Ret);
-
-        s32Ret = RK_MPI_VENC_ReleaseStream(0, &stFrame);
-        if (s32Ret != RK_SUCCESS)
-            RK_LOGE("RK_MPI_VENC_ReleaseStream fail %x", s32Ret);
     }
 
     // -----------------------------------------------------------------------
