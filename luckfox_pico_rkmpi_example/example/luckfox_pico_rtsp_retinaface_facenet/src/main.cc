@@ -32,7 +32,9 @@
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
+#include <mutex>
 
+#include <curl/curl.h>
 #include "rtsp_demo.h"
 #include "luckfox_mpi.h"
 #include "retinaface_facenet.h"
@@ -40,6 +42,7 @@
 #include "face_db.h"
 #include "face_event_manager.h"
 #include "face_test_runner.h"
+#include "mqtt_client.h"
 #include "telegram_client.h"
 #include "attendance_utils.h"
 
@@ -94,6 +97,131 @@ static void onAttendanceSuccess(const TelegramClient& telegram,
     caption += formatTimeForTelegram(data.time);
 
     telegram.sendPhoto(image_path, caption);
+}
+
+static void publishAttendanceMqtt(MqttClient& mqtt,
+                                  const AttendanceData& data,
+                                  const std::string& image_path)
+{
+    MqttRecognitionPayload payload;
+    payload.person_id = data.user_id;
+    payload.name = data.name;
+    payload.time = data.time;
+    payload.image_path = image_path;
+    payload.confidence = data.confidence;
+    payload.distance = data.distance;
+    mqtt.publishRecognition(payload);
+}
+
+static bool starts_with(const std::string& value, const char *prefix)
+{
+    const size_t prefix_len = strlen(prefix);
+    return value.size() >= prefix_len &&
+           value.compare(0, prefix_len, prefix) == 0;
+}
+
+static std::string safe_token(std::string value)
+{
+    for (char& ch : value) {
+        unsigned char c = (unsigned char)ch;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            ch = '_';
+        }
+    }
+    if (value.empty())
+        value = "face";
+    return value;
+}
+
+static bool env_bool(const char *name, bool fallback)
+{
+    const char *value = getenv(name);
+    if (!value || value[0] == '\0')
+        return fallback;
+    return strcmp(value, "1") == 0 ||
+           strcmp(value, "true") == 0 ||
+           strcmp(value, "TRUE") == 0 ||
+           strcmp(value, "yes") == 0 ||
+           strcmp(value, "YES") == 0;
+}
+
+static size_t write_file_callback(char *ptr,
+                                  size_t size,
+                                  size_t nmemb,
+                                  void *userdata)
+{
+    FILE *fp = static_cast<FILE *>(userdata);
+    return fwrite(ptr, size, nmemb, fp);
+}
+
+static bool download_face_image(const RegisterFaceRequest& request,
+                                std::string *local_path,
+                                std::string *error)
+{
+    if (!local_path || !error)
+        return false;
+
+    if (request.face_link.empty()) {
+        *error = "face_link is empty";
+        return false;
+    }
+
+    if (!starts_with(request.face_link, "http://") &&
+        !starts_with(request.face_link, "https://")) {
+        *local_path = request.face_link;
+        return true;
+    }
+
+    static std::once_flag curl_once;
+    std::call_once(curl_once, []() {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+    });
+
+    const std::string path =
+        "/tmp/mqtt_register_face_" + safe_token(request.uuid) + ".jpg";
+    FILE *fp = fopen(path.c_str(), "wb");
+    if (!fp) {
+        *error = "cannot create temp image file";
+        return false;
+    }
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        fclose(fp);
+        unlink(path.c_str());
+        *error = "curl_easy_init failed";
+        return false;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, request.face_link.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "luckfox-face-mqtt/1.0");
+    if (env_bool("MQTT_FACE_ALLOW_INSECURE", false)) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+
+    CURLcode code = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    fclose(fp);
+
+    if (code != CURLE_OK || http_code < 200 || http_code >= 300) {
+        unlink(path.c_str());
+        *error = std::string("download failed: ") + curl_easy_strerror(code) +
+                 " http=" + std::to_string(http_code);
+        return false;
+    }
+
+    *local_path = path;
+    return true;
 }
 
 // -------------------------------------------------------------------------
@@ -271,6 +399,9 @@ static int do_run(const char *retina_model_path,
         face_db_print(&db);
     }
 
+    std::mutex db_mutex;
+    std::mutex model_mutex;
+
     system("RkLunch-stop.sh");
 
     const int width        = DISP_WIDTH;
@@ -384,6 +515,76 @@ static int do_run(const char *retina_model_path,
     printf("[run] Ready — rtsp://<device>:554/live/0\n");
 
     TelegramClient telegram;
+    MqttClient mqtt;
+    mqtt.setRegisterHandler(
+        [&](const RegisterFaceRequest& request) -> RegisterFaceResponse {
+            RegisterFaceResponse response;
+
+            if (request.name.empty()) {
+                response.status = false;
+                response.message = "name is empty";
+                return response;
+            }
+            if (request.face_link.empty()) {
+                response.status = false;
+                response.message = "face_link is empty";
+                return response;
+            }
+
+            std::string image_path;
+            std::string error;
+            if (!download_face_image(request, &image_path, &error)) {
+                response.status = false;
+                response.message = error;
+                return response;
+            }
+
+            cv::Mat image = cv::imread(image_path);
+            if (image.empty()) {
+                response.status = false;
+                response.message = "cannot load face image";
+                return response;
+            }
+
+            float embedding[FACE_DB_EMBED_DIM];
+            int embed_ret = 0;
+            {
+                std::lock_guard<std::mutex> lock(model_mutex);
+                embed_ret = compute_embedding(image, &app_retinaface_ctx,
+                                              &app_facenet_ctx, embedding);
+            }
+            if (embed_ret != 0) {
+                response.status = false;
+                response.message = "no face detected";
+                return response;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(db_mutex);
+                int add_ret = face_db_add_with_info(
+                    &db, request.name.c_str(), request.sex.c_str(),
+                    request.cccd.c_str(), embedding);
+                if (add_ret != 0) {
+                    response.status = false;
+                    response.message = "database full";
+                    return response;
+                }
+                if (face_db_save(&db, db_path) != 0) {
+                    response.status = false;
+                    response.message = "save database failed";
+                    return response;
+                }
+                face_db_print(&db);
+            }
+
+            response.status = true;
+            response.message = "register success";
+            printf("[mqtt-register] registered %s from %s\n",
+                   request.name.c_str(), request.face_link.c_str());
+            return response;
+        });
+    mqtt.start();
+
     FaceEventManager attendance_events;
     attendance_events.setAttendanceSuccessCallback(
         [](const std::string& name, const std::string& time) {
@@ -391,9 +592,10 @@ static int do_run(const char *retina_model_path,
                    name.c_str(), time.c_str());
         });
     attendance_events.setAttendanceDataCallback(
-        [&telegram](const AttendanceData& data,
-                    const std::string& image_path) {
+        [&telegram, &mqtt](const AttendanceData& data,
+                           const std::string& image_path) {
             onAttendanceSuccess(telegram, data, image_path);
+            publishAttendanceMqtt(mqtt, data, image_path);
         });
 
     // -----------------------------------------------------------------------
@@ -415,6 +617,12 @@ static int do_run(const char *retina_model_path,
             cv::Mat bgr(height, width, CV_8UC3);
             cv::cvtColor(yuv420sp, bgr, cv::COLOR_YUV420sp2BGR);
 
+            long align_us   = 0;
+            long facenet_us = 0;
+
+            {
+                std::lock_guard<std::mutex> model_lock(model_mutex);
+
             // Resize for RetinaFace
             cv::Mat model_bgr(model_height, model_width, CV_8UC3);
             cv::resize(bgr, model_bgr,
@@ -433,9 +641,6 @@ static int do_run(const char *retina_model_path,
             // -----------------------------------------------------------
             // Phase 1: per-face embedding + DB lookup
             // -----------------------------------------------------------
-            long align_us   = 0;
-            long facenet_us = 0;
-
             for (int i = 0; i < od_results.count; i++) {
                 object_detect_result *det = &(od_results.results[i]);
 
@@ -511,12 +716,18 @@ static int do_run(const char *retina_model_path,
 
                 // Match against database
                 float  dist;
-                int    idx = face_db_find(&db, face_fp32, &dist);
+                int    idx;
+                {
+                    std::lock_guard<std::mutex> db_lock(db_mutex);
+                    idx = face_db_find(&db, face_fp32, &dist);
+                    if (idx >= 0 && dist < FACE_DIST_THRESHOLD) {
+                        strncpy(face_names[i], db.entries[idx].name,
+                                FACE_DB_NAME_LEN - 1);
+                        face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                    }
+                }
                 face_dists[i] = dist;
                 if (idx >= 0 && dist < FACE_DIST_THRESHOLD) {
-                    strncpy(face_names[i], db.entries[idx].name,
-                            FACE_DB_NAME_LEN - 1);
-                    face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
                     face_confidences[i] =
                         confidence_from_face_distance(dist);
                     snprintf(face_ids[i], sizeof(face_ids[i]),
@@ -536,6 +747,8 @@ static int do_run(const char *retina_model_path,
                     event_result.distance = face_dists[i];
                     attendance_events.onFrame(Frame(bgr), event_result);
                 }
+            }
+
             }
 
             // -----------------------------------------------------------
