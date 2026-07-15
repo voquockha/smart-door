@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -220,6 +221,8 @@ MqttClient::MqttClient()
       serial_number_(getEnvOrDefault("MQTT_SERIAL_NUMBER", "LF-CAM-000001")),
       device_model_(getEnvOrDefault("MQTT_DEVICE_MODEL", "camera_001")),
       firmware_version_(getEnvOrDefault("MQTT_FIRMWARE_VERSION", "1.0.0")),
+      status_interval_seconds_(
+          std::max(0, getEnvInt("MQTT_STATUS_INTERVAL_SECONDS", 60))),
       device_secret_(getEnvOrDefault("MQTT_DEVICE_SECRET",
                                      "luckfox-dev-secret")),
       credential_path_(getEnvOrDefault("MQTT_CREDENTIAL_PATH",
@@ -254,7 +257,8 @@ MqttClient::MqttClient()
       pending_uuid_(),
       provisioning_response_topic_(),
       next_status_check_(std::chrono::steady_clock::now()),
-      include_image_base64_(getEnvBool("MQTT_INCLUDE_IMAGE_BASE64", true)),
+      next_status_publish_(std::chrono::steady_clock::now()),
+      include_image_base64_(getEnvBool("MQTT_INCLUDE_IMAGE_BASE64", false)),
       running_(false),
       connected_(false),
       socket_fd_(-1),
@@ -291,12 +295,14 @@ MqttClient::MqttClient()
         }
     }
 
-    printf("[mqtt] init enabled=%s provisioning=%s broker=%s:%d mode=%d subscribe=%s response=%s event=%s device_id=%s credential=%s\n",
+    printf("[mqtt] init enabled=%s provisioning=%s broker=%s:%d mode=%d subscribe=%s response=%s event=%s status=%s status_interval=%ds device_id=%s credential=%s\n",
            enabled_ ? "true" : "false",
            provisioning_enabled_ ? "true" : "false",
            active_host_.c_str(), active_port_, (int)mode_,
            active_subscribe_topic_.c_str(), response_topic_.c_str(),
-           event_topic_.c_str(), device_id_.c_str(), credential_path_.c_str());
+           event_topic_.c_str(), status_topic_.c_str(),
+           status_interval_seconds_, device_id_.c_str(),
+           credential_path_.c_str());
 }
 
 MqttClient::~MqttClient()
@@ -370,6 +376,15 @@ void MqttClient::loop()
         if (mode_ == Mode::PROVISIONING_PENDING &&
             std::chrono::steady_clock::now() >= next_status_check_) {
             publishCheckRegisterStatus();
+        }
+
+        const auto status_now = std::chrono::steady_clock::now();
+        if ((mode_ == Mode::LOCAL_ANONYMOUS || mode_ == Mode::PRODUCTION) &&
+            status_interval_seconds_ > 0 &&
+            status_now >= next_status_publish_) {
+            publishDeviceOnline();
+            next_status_publish_ =
+                status_now + std::chrono::seconds(status_interval_seconds_);
         }
 
         unsigned char packet_type = 0;
@@ -494,9 +509,12 @@ void MqttClient::afterConnected()
         publishRegisterDevice();
     } else if (mode_ == Mode::PROVISIONING_PENDING) {
         publishCheckRegisterStatus();
-    } else if (mode_ == Mode::PRODUCTION) {
+    } else if (mode_ == Mode::LOCAL_ANONYMOUS || mode_ == Mode::PRODUCTION) {
         publishDeviceOnline();
-        flushOfflineEvents();
+        next_status_publish_ = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(status_interval_seconds_);
+        if (mode_ == Mode::PRODUCTION)
+            flushOfflineEvents();
     }
 }
 
@@ -671,6 +689,8 @@ void MqttClient::handleRegisterRequest(const std::string& payload)
         request.name = jsonGetString(payload, "person_name");
     request.sex = jsonGetString(payload, "sex");
     request.cccd = jsonGetString(payload, "cccd");
+    request.employee_id = jsonGetString(payload, "employee_id");
+    request.company_id = jsonGetString(payload, "company_id");
 
     RegisterFaceResponse response;
     if (request.command != "register_face") {
@@ -815,7 +835,9 @@ std::string MqttClient::buildRegisterResponse(
     out << "\"face_link\":\"" << jsonEscape(request.face_link) << "\",";
     out << "\"name\":\"" << jsonEscape(request.name) << "\",";
     out << "\"sex\":\"" << jsonEscape(request.sex) << "\",";
-    out << "\"cccd\":\"" << jsonEscape(request.cccd) << "\"";
+    out << "\"cccd\":\"" << jsonEscape(request.cccd) << "\",";
+    out << "\"employee_id\":\"" << jsonEscape(request.employee_id) << "\",";
+    out << "\"company_id\":\"" << jsonEscape(request.company_id) << "\"";
     out << "}}";
     return out.str();
 }
@@ -844,8 +866,11 @@ std::string MqttClient::buildRecognitionEvent(
     if (mode_ == Mode::PRODUCTION) {
         out << "\"person_id\":\"" << jsonEscape(payload.person_id) << "\",";
         out << "\"person_name\":\"" << jsonEscape(payload.name) << "\",";
+        out << "\"employee_id\":\"" << jsonEscape(payload.employee_id) << "\",";
+        out << "\"company_id\":\"" << jsonEscape(payload.company_id) << "\",";
         out << "\"confidence\":" << payload.confidence << ",";
         out << "\"distance\":" << payload.distance << ",";
+        out << "\"liveness_score\":" << payload.liveness_score << ",";
         out << "\"camera_id\":\"cam_001\",";
         out << "\"capture_time\":\"" << jsonEscape(nowIsoUtc()) << "\",";
         out << "\"image\":{";
@@ -859,6 +884,8 @@ std::string MqttClient::buildRecognitionEvent(
         out << "\"face_link\":\"" << jsonEscape(payload.image_path) << "\",";
         out << "\"name\":\"" << jsonEscape(payload.name) << "\",";
         out << "\"person_id\":\"" << jsonEscape(payload.person_id) << "\",";
+        out << "\"employee_id\":\"" << jsonEscape(payload.employee_id) << "\",";
+        out << "\"company_id\":\"" << jsonEscape(payload.company_id) << "\",";
         out << "\"time\":\"" << jsonEscape(payload.time) << "\",";
         out << "\"confidence\":" << payload.confidence << ",";
         out << "\"distance\":" << payload.distance;
@@ -906,13 +933,21 @@ std::string MqttClient::buildRegisterDeviceRequest(const std::string& uuid,
 
 std::string MqttClient::buildDeviceOnlineEvent()
 {
+    struct sysinfo system_info;
+    memset(&system_info, 0, sizeof(system_info));
+    const long uptime_seconds = sysinfo(&system_info) == 0
+                                    ? std::max(0L, system_info.uptime)
+                                    : 0L;
+
     std::ostringstream data;
     data << "{";
     data << "\"device_uid\":\"" << jsonEscape(device_id_) << "\",";
+    data << "\"serial_number\":\"" << jsonEscape(serial_number_) << "\",";
+    data << "\"model\":\"" << jsonEscape(device_model_) << "\",";
     data << "\"mac\":\"" << jsonEscape(mac_) << "\",";
     data << "\"ip\":\"" << jsonEscape(getIpAddress()) << "\",";
     data << "\"firmware_version\":\"" << jsonEscape(firmware_version_) << "\",";
-    data << "\"uptime\":0,";
+    data << "\"uptime\":" << uptime_seconds << ",";
     data << "\"state\":\"running\"";
     data << "}";
 

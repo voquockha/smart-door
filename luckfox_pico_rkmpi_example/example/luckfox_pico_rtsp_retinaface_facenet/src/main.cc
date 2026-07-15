@@ -45,6 +45,7 @@
 #include "mqtt_client.h"
 #include "telegram_client.h"
 #include "attendance_utils.h"
+#include "anti_spoof.h"
 
 #include "opencv2/core/core.hpp"
 #include "opencv2/highgui/highgui.hpp"
@@ -60,6 +61,8 @@
 #define FACENET_WIDTH       160
 #define FACENET_HEIGHT      160
 #define FACE_DIST_THRESHOLD 0.95f
+#define ANTI_SPOOF_DEFAULT_MODEL "model/minifasnet_v2_80x80.rknn"
+#define ANTI_SPOOF_REAL_THRESHOLD 0.80f
 
 // -------------------------------------------------------------------------
 // Timing helper
@@ -79,6 +82,22 @@ static inline float confidence_from_face_distance(float dist)
     float normalized = 1.0f - (dist / FACE_DIST_THRESHOLD);
     float confidence = 0.80f + 0.20f * normalized;
     return std::max(0.0f, std::min(confidence, 1.0f));
+}
+
+static float env_float(const char* name, float fallback,
+                       float minimum, float maximum)
+{
+    const char* value = getenv(name);
+    if (!value || !*value)
+        return fallback;
+    char* end = nullptr;
+    const float parsed = strtof(value, &end);
+    if (!end || *end != '\0' || parsed < minimum || parsed > maximum) {
+        printf("[config] invalid %s=%s, use %.2f\n",
+               name, value, (double)fallback);
+        return fallback;
+    }
+    return parsed;
 }
 
 static void onAttendanceSuccess(const TelegramClient& telegram,
@@ -106,10 +125,13 @@ static void publishAttendanceMqtt(MqttClient& mqtt,
     MqttRecognitionPayload payload;
     payload.person_id = data.user_id;
     payload.name = data.name;
+    payload.employee_id = data.employee_id;
+    payload.company_id = data.company_id;
     payload.time = data.time;
     payload.image_path = image_path;
     payload.confidence = data.confidence;
     payload.distance = data.distance;
+    payload.liveness_score = data.liveness_score;
     mqtt.publishRecognition(payload);
 }
 
@@ -233,7 +255,7 @@ static void print_usage(const char *prog)
     printf("  Register: %s register <retina_model> <facenet_model>"
            " <db_path> <name> <image>\n", prog);
     printf("  Run:      %s run      <retina_model> <facenet_model>"
-           " <db_path>\n", prog);
+           " <db_path> [anti_spoof_model]\n", prog);
     printf("  Test:     %s test     <retina_model> <facenet_model>"
            " <db_path> [image_dir]\n", prog);
     printf("  Telegram: %s telegram-test [message]\n", prog);
@@ -383,7 +405,8 @@ static int do_register(const char *retina_model_path,
 // =========================================================================
 static int do_run(const char *retina_model_path,
                   const char *facenet_model_path,
-                  const char *db_path)
+                  const char *db_path,
+                  const char *anti_spoof_model_path)
 {
     // -----------------------------------------------------------------------
     // Load face database
@@ -422,6 +445,7 @@ static int do_run(const char *retina_model_path,
     // -----------------------------------------------------------------------
     rknn_app_context_t app_retinaface_ctx;
     rknn_app_context_t app_facenet_ctx;
+    AntiSpoofContext anti_spoof_ctx;
     object_detect_result_list od_results;
 
     memset(&app_retinaface_ctx, 0, sizeof(rknn_app_context_t));
@@ -436,6 +460,18 @@ static int do_run(const char *retina_model_path,
         return -1;
     }
 
+    ret = init_anti_spoof_model(anti_spoof_model_path, &anti_spoof_ctx);
+    if (ret != 0) {
+        printf("[run] Anti-spoof model is required; refusing to start\n");
+        release_facenet_model(&app_facenet_ctx);
+        release_retinaface_model(&app_retinaface_ctx);
+        return -1;
+    }
+    const float anti_spoof_threshold = env_float(
+        "ANTI_SPOOF_THRESHOLD", ANTI_SPOOF_REAL_THRESHOLD, 0.50f, 0.99f);
+    printf("[run] effective anti-spoof threshold=%.2f\n",
+           (double)anti_spoof_threshold);
+
     float *face_fp32 = (float *)malloc(sizeof(float) * FACE_DB_EMBED_DIM);
 
     // Per-face result storage (parallel arrays for detection loop + draw loop)
@@ -443,6 +479,11 @@ static int do_run(const char *retina_model_path,
     float face_confidences[128];
     char  face_ids[128][32];
     char  face_names[128][FACE_DB_NAME_LEN];
+    bool  face_liveness_verified[128];
+    bool  face_is_spoof[128];
+    bool  face_needs_position[128];
+    float face_liveness_scores[128];
+    std::string face_instructions[128];
 
     // -----------------------------------------------------------------------
     // VENC frame buffer
@@ -495,6 +536,9 @@ static int do_run(const char *retina_model_path,
         RK_LOGE("[run] rk mpi sys init fail!");
         free(face_fp32);
         free(stFrame.pstPack);
+        release_anti_spoof_model(&anti_spoof_ctx);
+        release_facenet_model(&app_facenet_ctx);
+        release_retinaface_model(&app_retinaface_ctx);
         return -1;
     }
 
@@ -566,7 +610,8 @@ static int do_run(const char *retina_model_path,
                 std::lock_guard<std::mutex> lock(db_mutex);
                 int add_ret = face_db_add_with_info(
                     &db, request.name.c_str(), request.sex.c_str(),
-                    request.cccd.c_str(), embedding);
+                    request.cccd.c_str(), request.employee_id.c_str(),
+                    request.company_id.c_str(), embedding);
                 if (add_ret != 0) {
                     response.status = false;
                     response.message = "database full";
@@ -623,6 +668,7 @@ static int do_run(const char *retina_model_path,
 
             long align_us   = 0;
             long facenet_us = 0;
+            long anti_spoof_us = 0;
 
             {
                 std::lock_guard<std::mutex> model_lock(model_mutex);
@@ -648,6 +694,21 @@ static int do_run(const char *retina_model_path,
             for (int i = 0; i < od_results.count; i++) {
                 object_detect_result *det = &(od_results.results[i]);
 
+                face_liveness_verified[i] = false;
+                face_is_spoof[i] = false;
+                face_needs_position[i] = false;
+                face_liveness_scores[i] = 0.0f;
+                face_instructions[i].clear();
+
+                int sX = (int)((float)det->box.left   * scale_x);
+                int sY = (int)((float)det->box.top    * scale_y);
+                int eX = (int)((float)det->box.right  * scale_x);
+                int eY = (int)((float)det->box.bottom * scale_y);
+                sX = std::max(0, std::min(sX, width  - 1));
+                sY = std::max(0, std::min(sY, height - 1));
+                eX = std::max(0, std::min(eX, width  - 1));
+                eY = std::max(0, std::min(eY, height - 1));
+
                 // Scale landmarks to display space
                 float lm_x[5], lm_y[5];
                 for (int j = 0; j < 5; j++) {
@@ -661,6 +722,82 @@ static int do_run(const char *retina_model_path,
                        lm_x[0], lm_y[0], lm_x[1], lm_y[1],
                        lm_x[2], lm_y[2], lm_x[3], lm_y[3],
                        lm_x[4], lm_y[4]);
+
+                // A clipped face does not contain enough skin/context for a
+                // reliable passive anti-spoof decision. Keep it fail-closed,
+                // but distinguish positioning from an actual spoof result.
+                const int edge_margin = 2;
+                const bool face_clipped =
+                    sX <= edge_margin || sY <= edge_margin ||
+                    eX >= width - 1 - edge_margin ||
+                    eY >= height - 1 - edge_margin;
+                if (face_clipped) {
+                    face_dists[i] = 9999.0f;
+                    face_confidences[i] = 0.0f;
+                    face_ids[i][0] = '\0';
+                    strncpy(face_names[i], "UNKNOWN", FACE_DB_NAME_LEN - 1);
+                    face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                    face_needs_position[i] = true;
+                    face_instructions[i] = "MOVE TO CENTER";
+                    printf("[face-quality %d] clipped by frame edge; "
+                           "anti-spoof skipped\n", i);
+                    continue;
+                }
+
+                const float face_width = (float)std::max(1, eX - sX);
+                const float eye_span = std::abs(lm_x[1] - lm_x[0]);
+                const float mouth_span = std::abs(lm_x[4] - lm_x[3]);
+                const bool face_profile =
+                    eye_span < face_width * 0.18f ||
+                    mouth_span < face_width * 0.14f;
+                if (face_profile) {
+                    face_dists[i] = 9999.0f;
+                    face_confidences[i] = 0.0f;
+                    face_ids[i][0] = '\0';
+                    strncpy(face_names[i], "UNKNOWN", FACE_DB_NAME_LEN - 1);
+                    face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                    face_needs_position[i] = true;
+                    face_instructions[i] = "LOOK AT CAMERA";
+                    printf("[face-quality %d] profile pose eye=%.3f "
+                           "mouth=%.3f; anti-spoof skipped\n",
+                           i, (double)(eye_span / face_width),
+                           (double)(mouth_span / face_width));
+                    continue;
+                }
+
+                // Passive liveness runs before FaceNet. Spoofed faces never
+                // reach identity matching or the attendance event manager.
+                struct timespec anti_start, anti_done;
+                clock_gettime(CLOCK_MONOTONIC, &anti_start);
+                AntiSpoofResult anti_result;
+                const cv::Rect detected_box(
+                    sX, sY, std::max(0, eX - sX), std::max(0, eY - sY));
+                const int anti_ret = inference_anti_spoof_model(
+                    &anti_spoof_ctx, bgr, detected_box,
+                    anti_spoof_threshold, &anti_result);
+                clock_gettime(CLOCK_MONOTONIC, &anti_done);
+                anti_spoof_us += ts_diff_us(anti_start, anti_done);
+                face_liveness_scores[i] = anti_result.real_score;
+
+                if (anti_ret != 0 || !anti_result.is_real) {
+                    face_dists[i] = 9999.0f;
+                    face_confidences[i] = 0.0f;
+                    face_ids[i][0] = '\0';
+                    strncpy(face_names[i], "SPOOF", FACE_DB_NAME_LEN - 1);
+                    face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                    face_is_spoof[i] = true;
+                    face_instructions[i] = anti_ret == 0
+                        ? "SPOOF BLOCKED" : "ANTI-SPOOF ERROR";
+                    printf("[anti-spoof %d] %s real=%.3f probs="
+                           "[%.3f %.3f %.3f]\n",
+                           i, face_instructions[i].c_str(),
+                           (double)anti_result.real_score,
+                           (double)anti_result.probabilities[0],
+                           (double)anti_result.probabilities[1],
+                           (double)anti_result.probabilities[2]);
+                    continue;
+                }
+                face_liveness_verified[i] = true;
 
                 // Alignment / crop timing start
                 struct timespec ta;
@@ -678,14 +815,6 @@ static int do_run(const char *retina_model_path,
                 memcpy(app_facenet_ctx.input_mems[0]->virt_addr,
                        aligned_rs.data, facenet_width * facenet_height * 3);
 #else
-                int sX = (int)((float)det->box.left   * scale_x);
-                int sY = (int)((float)det->box.top    * scale_y);
-                int eX = (int)((float)det->box.right  * scale_x);
-                int eY = (int)((float)det->box.bottom * scale_y);
-                sX = std::max(0, std::min(sX, width  - 1));
-                sY = std::max(0, std::min(sY, height - 1));
-                eX = std::max(0, std::min(eX, width  - 1));
-                eY = std::max(0, std::min(eY, height - 1));
                 int fw = eX - sX, fh = eY - sY;
                 if (fw <= 0 || fh <= 0) {
                     face_dists[i] = 9999.0f;
@@ -721,6 +850,8 @@ static int do_run(const char *retina_model_path,
                 // Match against database
                 float  dist;
                 int    idx;
+                std::string employee_id;
+                std::string company_id;
                 {
                     std::lock_guard<std::mutex> db_lock(db_mutex);
                     idx = face_db_find(&db, face_fp32, &dist);
@@ -728,6 +859,8 @@ static int do_run(const char *retina_model_path,
                         strncpy(face_names[i], db.entries[idx].name,
                                 FACE_DB_NAME_LEN - 1);
                         face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                        employee_id = db.entries[idx].employee_id;
+                        company_id = db.entries[idx].company_id;
                     }
                 }
                 face_dists[i] = dist;
@@ -747,9 +880,17 @@ static int do_run(const char *retina_model_path,
                     event_result.recognized = true;
                     event_result.person_id = face_ids[i];
                     event_result.name = face_names[i];
+                    event_result.employee_id = employee_id;
+                    event_result.company_id = company_id;
                     event_result.confidence = face_confidences[i];
                     event_result.distance = face_dists[i];
-                    attendance_events.onFrame(Frame(bgr), event_result);
+                    event_result.liveness_verified = true;
+                    event_result.liveness_score = anti_result.real_score;
+
+                    const AttendanceFrameDecision decision =
+                        attendance_events.onFrame(Frame(bgr), event_result);
+                    face_liveness_verified[i] = decision.liveness_verified;
+                    face_instructions[i] = decision.instruction;
                 }
             }
 
@@ -771,24 +912,53 @@ static int do_run(const char *retina_model_path,
                 eY = std::max(0, std::min(eY, height - 1));
 
                 bool matched = (strcmp(face_names[i], "UNKNOWN") != 0);
-                cv::Scalar color = matched
-                                   ? cv::Scalar(0, 255, 0)
-                                   : cv::Scalar(0, 0, 255);
+                matched = matched && !face_is_spoof[i];
+                const bool live = matched && face_liveness_verified[i];
+                cv::Scalar color;
+                if (face_is_spoof[i])
+                    color = cv::Scalar(255, 0, 255);
+                else if (face_needs_position[i])
+                    color = cv::Scalar(0, 215, 255);
+                else if (!matched)
+                    color = cv::Scalar(0, 0, 255);
+                else if (live)
+                    color = cv::Scalar(0, 255, 0);
+                else
+                    color = cv::Scalar(0, 215, 255);
 
                 cv::rectangle(frame,
                               cv::Point(sX, sY), cv::Point(eX, eY),
                               color, 3);
 
-                // Label: "Name (dist)" or "UNKNOWN"
-                char label[FACE_DB_NAME_LEN + 16];
-                if (matched)
-                    snprintf(label, sizeof(label), "%s (%.2f)",
+                // Magenta means the passive model blocked a presentation
+                // attack. Green means liveness and identity both passed.
+                std::string label;
+                if (face_is_spoof[i]) {
+                    char spoof_label[64];
+                    snprintf(spoof_label, sizeof(spoof_label),
+                             "%s - real %.2f", face_instructions[i].c_str(),
+                             face_liveness_scores[i]);
+                    label = spoof_label;
+                } else if (face_needs_position[i]) {
+                    label = face_instructions[i];
+                } else if (matched) {
+                    char identity[FACE_DB_NAME_LEN + 16];
+                    snprintf(identity, sizeof(identity), "%s (%.2f)",
                              face_names[i], face_dists[i]);
-                else
-                    snprintf(label, sizeof(label), "UNKNOWN");
+                    label = identity;
+                    if (!face_instructions[i].empty()) {
+                        label += " - ";
+                        label += face_instructions[i];
+                    }
+                } else {
+                    label = "UNKNOWN";
+                }
 
-                printf("[face %d] %s  dist=%.3f\n",
-                       i, face_names[i], face_dists[i]);
+                printf("[face %d] %s  dist=%.3f  liveness=%s %.3f  %s\n",
+                       i, face_names[i], face_dists[i],
+                       live ? "verified" : "pending",
+                       (double)face_liveness_scores[i],
+                       face_instructions[i].c_str());
 
                 cv::putText(frame, label,
                             cv::Point(sX, std::max(0, sY - 8)),
@@ -802,10 +972,10 @@ static int do_run(const char *retina_model_path,
             // -----------------------------------------------------------
             struct timespec t_end;
             clock_gettime(CLOCK_MONOTONIC, &t_end);
-            printf("[bench] Retina=%ld us  Align=%ld us  FaceNet=%ld us"
+            printf("[bench] Retina=%ld us  AntiSpoof=%ld us  Align=%ld us  FaceNet=%ld us"
                    "  Total=%ld us  Faces=%d\n",
                    ts_diff_us(t_frame_start, t_retina_done),
-                   align_us, facenet_us,
+                   anti_spoof_us, align_us, facenet_us,
                    ts_diff_us(t_frame_start, t_end),
                    od_results.count);
         } else {
@@ -867,6 +1037,7 @@ static int do_run(const char *retina_model_path,
 
     release_facenet_model(&app_facenet_ctx);
     release_retinaface_model(&app_retinaface_ctx);
+    release_anti_spoof_model(&anti_spoof_ctx);
     return 0;
 }
 
@@ -902,7 +1073,9 @@ static int do_test(const char *retina_model_path,
     }
 
     TelegramClient telegram;
-    FaceEventManager attendance_events;
+    // Static-image test mode intentionally bypasses liveness.  Production
+    // camera mode above always uses the default (liveness required).
+    FaceEventManager attendance_events(false);
 
     attendance_events.setAttendanceSuccessCallback(
         [](const std::string& name, const std::string& time) {
@@ -984,12 +1157,15 @@ int main(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "run") == 0) {
-        // run <retina> <facenet> <db>  => 5 args
-        if (argc != 5) {
-            printf("run needs: <retina_model> <facenet_model> <db_path>\n");
+        // The optional path keeps old launch commands working; installed
+        // packages include the default model under ./model.
+        if (argc != 5 && argc != 6) {
+            printf("run needs: <retina_model> <facenet_model> <db_path>"
+                   " [anti_spoof_model]\n");
             return -1;
         }
-        return do_run(argv[2], argv[3], argv[4]);
+        return do_run(argv[2], argv[3], argv[4],
+                      argc == 6 ? argv[5] : ANTI_SPOOF_DEFAULT_MODEL);
     }
 
     if (strcmp(argv[1], "test") == 0) {

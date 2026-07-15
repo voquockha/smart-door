@@ -91,9 +91,10 @@ void FaceEventManager::ThreadSafeQueue<T>::shutdown()
     cv_.notify_all();
 }
 
-FaceEventManager::FaceEventManager()
+FaceEventManager::FaceEventManager(bool require_liveness)
     : confidence_threshold_(kDefaultConfidenceThreshold),
       cooldown_seconds_(kDefaultCooldownSeconds),
+      require_liveness_(require_liveness),
       requested_base_dir_(
           getEnvOrDefault("ATTENDANCE_BASE_DIR", "/data/attendance")),
       effective_base_dir_(requested_base_dir_),
@@ -106,6 +107,9 @@ FaceEventManager::FaceEventManager()
       work_queue_(kDefaultQueueCapacity),
       running_(true)
 {
+    printf("[liveness] passive RKNN gate: %s\n",
+           require_liveness_ ? "required" : "disabled (test mode only)");
+
     if (!ensureDirectory(requested_base_dir_) ||
         !isDirectoryWritable(requested_base_dir_)) {
         effective_base_dir_ = "/tmp/attendance";
@@ -143,14 +147,20 @@ void FaceEventManager::setAttendanceDataCallback(AttendanceDataCallback callback
     attendance_data_callback_ = std::move(callback);
 }
 
-void FaceEventManager::onFrame(Frame frame, FaceResult result)
+AttendanceFrameDecision FaceEventManager::onFrame(Frame frame,
+                                                   FaceResult result)
 {
     if (!isValid(result))
-        return;
+        return makeDecision(false, false, "");
+    if (require_liveness_ && !result.liveness_verified)
+        return makeDecision(false, false, "SPOOF BLOCKED");
     if (isCooldown(result.person_id))
-        return;
+        return makeDecision(false, true, "DIEM DANH OK");
 
-    handleEvent(frame, result);
+    if (!handleEvent(frame, result))
+        return makeDecision(false, false, "THU LAI");
+
+    return makeDecision(true, true, "DIEM DANH OK");
 }
 
 bool FaceEventManager::isValid(FaceResult r)
@@ -185,19 +195,32 @@ void FaceEventManager::markCooldown(std::string person_id)
     cooldown_[person_id] = std::chrono::steady_clock::now();
 }
 
-void FaceEventManager::handleEvent(Frame frame, FaceResult r)
+AttendanceFrameDecision FaceEventManager::makeDecision(
+    bool recorded, bool verified, const char* instruction)
+{
+    AttendanceFrameDecision decision;
+    decision.attendance_recorded = recorded;
+    decision.liveness_verified = verified;
+    decision.instruction = instruction ? instruction : "";
+    return decision;
+}
+
+bool FaceEventManager::handleEvent(Frame frame, FaceResult r)
 {
     if (frame.image_bgr.empty()) {
         printf("[attendance] Empty frame, skip event for %s\n", r.name.c_str());
-        return;
+        return false;
     }
 
     AttendanceJson data;
     data.user_id = r.person_id;
     data.name = r.name;
+    data.employee_id = r.employee_id;
+    data.company_id = r.company_id;
     data.time = nowTime();
     data.confidence = r.confidence;
     data.distance = r.distance;
+    data.liveness_score = r.liveness_score;
     data.camera_id = camera_id_;
 
     const std::string date_dir = joinPath(effective_base_dir_, nowDate());
@@ -215,10 +238,11 @@ void FaceEventManager::handleEvent(Frame frame, FaceResult r)
     if (!work_queue_.push(std::move(item))) {
         printf("[attendance] Worker queue full, drop event for %s\n",
                r.name.c_str());
-        return;
+        return false;
     }
 
     markCooldown(r.person_id);
+    return true;
 }
 
 bool FaceEventManager::saveImage(Frame frame, std::string path)
@@ -573,9 +597,12 @@ std::string FaceEventManager::metadataJson(const AttendanceJson& data)
     out << "{\n";
     out << "  \"id\": \"" << jsonEscape(data.user_id) << "\",\n";
     out << "  \"name\": \"" << jsonEscape(data.name) << "\",\n";
+    out << "  \"employee_id\": \"" << jsonEscape(data.employee_id) << "\",\n";
+    out << "  \"company_id\": \"" << jsonEscape(data.company_id) << "\",\n";
     out << "  \"time\": \"" << jsonEscape(data.time) << "\",\n";
     out << "  \"confidence\": " << data.confidence << ",\n";
     out << "  \"distance\": " << data.distance << ",\n";
+    out << "  \"liveness_score\": " << data.liveness_score << ",\n";
     out << "  \"camera_id\": \"" << jsonEscape(data.camera_id) << "\",\n";
     out << "  \"image_path\": \"" << jsonEscape(data.image_path) << "\"\n";
     out << "}\n";
@@ -589,9 +616,12 @@ std::string FaceEventManager::postJson(const AttendanceJson& data)
     out << "{";
     out << "\"user_id\":\"" << jsonEscape(data.user_id) << "\",";
     out << "\"name\":\"" << jsonEscape(data.name) << "\",";
+    out << "\"employee_id\":\"" << jsonEscape(data.employee_id) << "\",";
+    out << "\"company_id\":\"" << jsonEscape(data.company_id) << "\",";
     out << "\"time\":\"" << jsonEscape(data.time) << "\",";
     out << "\"confidence\":" << data.confidence << ",";
     out << "\"distance\":" << data.distance << ",";
+    out << "\"liveness_score\":" << data.liveness_score << ",";
     out << "\"image_path\":\"" << jsonEscape(data.image_path) << "\"";
     out << "}";
     return out.str();

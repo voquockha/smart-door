@@ -1,6 +1,7 @@
 #ifndef FACE_EVENT_MANAGER_H
 #define FACE_EVENT_MANAGER_H
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <map>
@@ -24,16 +25,31 @@ struct FaceResult {
     bool recognized = false;
     std::string person_id;
     std::string name;
+    std::string employee_id;
+    std::string company_id;
     float confidence = 0.0f;
     float distance = -1.0f;
+
+    // Set only after the passive RKNN anti-spoof model accepts the face.
+    bool liveness_verified = false;
+    float liveness_score = 0.0f;
+};
+
+struct AttendanceFrameDecision {
+    bool attendance_recorded = false;
+    bool liveness_verified = false;
+    std::string instruction;
 };
 
 struct AttendanceJson {
     std::string user_id;
     std::string name;
+    std::string employee_id;
+    std::string company_id;
     std::string time;
     float confidence = 0.0f;
     float distance = -1.0f;
+    float liveness_score = 0.0f;
     std::string camera_id;
     std::string image_path;
 };
@@ -48,13 +64,13 @@ public:
         std::function<void(const AttendanceData& data,
                            const std::string& image_path)>;
 
-    FaceEventManager();
+    explicit FaceEventManager(bool require_liveness = true);
     ~FaceEventManager();
 
     FaceEventManager(const FaceEventManager&) = delete;
     FaceEventManager& operator=(const FaceEventManager&) = delete;
 
-    void onFrame(Frame frame, FaceResult result);
+    AttendanceFrameDecision onFrame(Frame frame, FaceResult result);
     void setAttendanceSuccessCallback(AttendanceSuccessCallback callback);
     void setAttendanceDataCallback(AttendanceDataCallback callback);
 
@@ -86,7 +102,10 @@ private:
     bool isValid(FaceResult r);
     bool isCooldown(std::string person_id);
     void markCooldown(std::string person_id);
-    void handleEvent(Frame frame, FaceResult r);
+    bool handleEvent(Frame frame, FaceResult r);
+    static AttendanceFrameDecision makeDecision(bool recorded,
+                                                bool verified,
+                                                const char* instruction);
 
     bool saveImage(Frame frame, std::string path);
     bool saveMetadata(AttendanceJson data, std::string path);
@@ -122,6 +141,7 @@ private:
 
     const float confidence_threshold_;
     const int cooldown_seconds_;
+    const bool require_liveness_;
     const std::string requested_base_dir_;
     std::string effective_base_dir_;
     const std::string camera_id_;

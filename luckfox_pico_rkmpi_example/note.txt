@@ -18,8 +18,10 @@
 #   request:  x86-lite/local/device/mac/request
 #   response: x86-lite/local/device/mac/response
 #   event:    x86-lite/local/device/mac/event
+#   status:   x86-lite/local/device/mac/status (gửi ngay khi kết nối và mỗi 60 giây)
 # Có thể đổi bằng MQTT_HOST, MQTT_PORT, MQTT_REQUEST_TOPIC,
-# MQTT_RESPONSE_TOPIC, MQTT_EVENT_TOPIC.
+# MQTT_RESPONSE_TOPIC, MQTT_EVENT_TOPIC, MQTT_STATUS_TOPIC.
+# Đổi chu kỳ bằng MQTT_STATUS_INTERVAL_SECONDS; đặt 0 để tắt gửi định kỳ.
 # Nếu link HTTPS test bị lỗi CA, dùng tạm MQTT_FACE_ALLOW_INSECURE=1.
 mosquitto_pub -h 127.0.0.1 -t x86-lite/local/device/mac/request -m '{
   "uuid": "42418bd2-b3b5-4445-8408-f51a939c4864",
@@ -30,6 +32,8 @@ mosquitto_pub -h 127.0.0.1 -t x86-lite/local/device/mac/request -m '{
     "face_link": "https://xxxx.jpeg",
     "name": "Nguyen Van A",
     "sex": "Nam",
-    "cccd": "1234567890"
+    "cccd": "1234567890",
+    "employee_id": "vnpt_001",
+    "company_id": "vnpt"
   }
 }'

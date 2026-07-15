@@ -16,8 +16,6 @@ Code hiện tại đã hỗ trợ:
   `uuid`, `timestamp`, `device_id`, `command`, `message`, `status`, `data`.
 - Khi nhận diện thành công, gửi event qua MQTT topic khác.
 - Event có thể kèm ảnh dạng base64.
-- Ảnh evidence hiện lưu dạng `.bmp` bằng writer phần mềm để tránh crash
-  `opencv-mobile HW JPG encoder with rk mpp` khi pipeline RTSP/VENC đang chạy.
 - Flow provisioning thiết bị khi bật `MQTT_PROVISIONING_ENABLED=1`:
   `register_device`, `WAITING_USER_APPROVAL`, `check_register_status`,
   `DEVICE_APPROVED`, lưu credential và chuyển sang topic production.
@@ -67,11 +65,13 @@ docker run --rm -it \
 Mặc định:
 
 ```bash
-export MQTT_HOST=127.0.0.1
+export MQTT_HOST=10.82.117.122
 export MQTT_PORT=1883
 export MQTT_REQUEST_TOPIC=x86-lite/local/device/mac/request
 export MQTT_RESPONSE_TOPIC=x86-lite/local/device/mac/response
 export MQTT_EVENT_TOPIC=x86-lite/local/device/mac/event
+export MQTT_STATUS_TOPIC=x86-lite/local/device/mac/status
+export MQTT_STATUS_INTERVAL_SECONDS=60
 ```
 
 Các biến hữu ích:
@@ -79,6 +79,15 @@ Các biến hữu ích:
 ```bash
 # Device id trả trong response/event. Nếu không set sẽ lấy MAC eth0.
 export MQTT_DEVICE_ID="ee:7b:7f:0a:95:26"
+
+# Thông tin thiết bị được gửi trong status.
+export MQTT_SERIAL_NUMBER="LF-CAM-000001"
+export MQTT_DEVICE_MODEL="camera_001"
+export MQTT_FIRMWARE_VERSION="1.0.0"
+
+# Chu kỳ status tính bằng giây. Đặt 0 để tắt gửi định kỳ;
+# thiết bị vẫn gửi một status ngay sau khi kết nối broker.
+export MQTT_STATUS_INTERVAL_SECONDS=60
 
 # Bật/tắt gửi ảnh base64 trong event nhận diện.
 export MQTT_INCLUDE_IMAGE_BASE64=1
@@ -145,7 +154,7 @@ Khi chạy thành công, log sẽ có dạng:
 [mqtt] subscribed: x86-lite/local/device/mac/request
 ```
 
-## 6. Test subscribe response và event
+## 6. Test subscribe response, event và status
 
 Mở terminal 1 để xem response đăng ký:
 
@@ -157,6 +166,35 @@ Mở terminal 2 để xem event nhận diện thành công:
 
 ```bash
 mosquitto_sub -h 127.0.0.1 -t x86-lite/local/device/mac/event -v
+```
+
+Mở terminal 3 để xem status gửi ngay khi kết nối và gửi lại định kỳ:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -t x86-lite/local/device/mac/status -v
+```
+
+Payload status local giữ nguyên pattern message hiện tại:
+
+```json
+{
+  "uuid": "b1c3b3e2-9e8a-44bb-9483-60b55b392981",
+  "timestamp": "2026-07-13T08:01:05Z",
+  "device_id": "ee:7b:7f:0a:95:26",
+  "command": "device_online",
+  "message": "device is online",
+  "status": true,
+  "data": {
+    "device_uid": "ee:7b:7f:0a:95:26",
+    "serial_number": "LF-CAM-000001",
+    "model": "camera_001",
+    "mac": "ee:7b:7f:0a:95:26",
+    "ip": "192.168.1.50",
+    "firmware_version": "1.0.0",
+    "uptime": 3600,
+    "state": "running"
+  }
+}
 ```
 
 ## 7. Test đăng ký gương mặt qua MQTT
@@ -172,10 +210,12 @@ mosquitto_pub -h 127.0.0.1 \
     "device_id": "mac eth0",
     "command": "register_face",
     "data": {
-      "face_link": "https://example.com/face.jpg",
-      "name": "Nguyen Van A",
+      "face_link": "https://leonard-tagged-specify-warming.trycloudflare.com/voquockha.png",
+      "name": "Vo Quoc Kha",
       "sex": "Nam",
-      "cccd": "1234567890"
+      "cccd": "999999991",
+      "employee_id": "vnpt_001",
+      "company_id": "vnpt"
     }
   }'
 ```
@@ -199,7 +239,9 @@ Response thành công:
     "face_link": "https://example.com/face.jpg",
     "name": "Nguyen Van A",
     "sex": "Nam",
-    "cccd": "1234567890"
+    "cccd": "1234567890",
+    "employee_id": "vnpt_001",
+    "company_id": "vnpt"
   }
 }
 ```
@@ -252,9 +294,11 @@ Payload hiện tại:
   "message": "recognition success",
   "status": true,
   "data": {
-    "face_link": "/data/attendance/2026-07-09/NguyenVanA_144000.bmp",
+    "face_link": "/data/attendance/2026-07-09/NguyenVanA_144000.jpg",
     "name": "Nguyen Van A",
     "person_id": "user_001",
+    "employee_id": "vnpt_001",
+    "company_id": "vnpt",
     "time": "2026-07-09 14:40:00",
     "confidence": 0.91,
     "distance": 0.42,
@@ -271,17 +315,13 @@ export MQTT_INCLUDE_IMAGE_BASE64=0
 
 Khi đó MQTT chỉ gửi `face_link` là path ảnh đã lưu trên thiết bị.
 
-Ghi chú: trước đây ảnh evidence lưu `.jpg` bằng `cv::imwrite`, nhưng trên
-LuckFox bản OpenCV mobile dùng MPP JPEG encoder và có thể crash khi đang chạy
-VENC/RTSP. Vì vậy code hiện tại lưu `.bmp` để ổn định trước.
-
 ## 9. Kiểm tra dữ liệu đã đăng ký
 
 Sau khi đăng ký thành công, log sẽ in:
 
 ```text
 [face_db] 1 registered face(s):
-  [0] Nguyen Van A sex=Nam cccd=1234567890
+  [0] Nguyen Van A sex=Nam cccd=1234567890 employee_id=vnpt_001 company_id=vnpt
 ```
 
 File DB nằm ở path truyền vào lệnh run, ví dụ:
@@ -290,8 +330,9 @@ File DB nằm ở path truyền vào lệnh run, ví dụ:
 face_db.bin
 ```
 
-DB mới có thêm metadata `sex` và `cccd`, nhưng code vẫn đọc được DB cũ chỉ có
-`name` và `embedding`.
+DB mới có thêm metadata `sex`, `cccd`, `employee_id` và `company_id`, nhưng
+code vẫn đọc được cả DB cũ chỉ có `name + embedding` và DB có
+`name + sex + cccd + embedding`.
 
 ## 10. Troubleshooting
 
@@ -330,7 +371,9 @@ mosquitto_pub -h 127.0.0.1 \
       "face_link": "/data/faces/test.jpg",
       "name": "Test User",
       "sex": "Nam",
-      "cccd": "0000000000"
+      "cccd": "0000000000",
+      "employee_id": "test_001",
+      "company_id": "test_company"
     }
   }'
 ```
@@ -536,11 +579,13 @@ File được ghi với mode `0600` nếu hệ điều hành hỗ trợ.
 
 ### 12.6. Sau khi vào production
 
-LuckFox publish `device_online` vào:
+LuckFox publish `device_online` ngay khi kết nối và gửi lại định kỳ vào:
 
 ```text
 devices/{device_uid}/up/status
 ```
+
+Chu kỳ dùng chung biến `MQTT_STATUS_INTERVAL_SECONDS` (mặc định 60 giây).
 
 LuckFox nhận command `register_face` từ:
 
@@ -711,12 +756,14 @@ Payload event mục tiêu:
   "data": {
     "person_id": "EMP001",
     "person_name": "Nguyen Van A",
+    "employee_id": "vnpt_001",
+    "company_id": "vnpt",
     "confidence": 0.91,
     "camera_id": "cam_001",
     "capture_time": "2026-07-09T14:40:00Z",
     "image": {
       "type": "base64",
-      "format": "bmp",
+      "format": "jpg",
       "content": "base64_image_here"
     }
   }

@@ -17,6 +17,8 @@ struct RegisterFaceRequest {
     std::string name;
     std::string sex;
     std::string cccd;
+    std::string employee_id;
+    std::string company_id;
 };
 
 struct RegisterFaceResponse {
@@ -27,10 +29,13 @@ struct RegisterFaceResponse {
 struct MqttRecognitionPayload {
     std::string person_id;
     std::string name;
+    std::string employee_id;
+    std::string company_id;
     std::string time;
     std::string image_path;
     float confidence = 0.0f;
     float distance = -1.0f;
+    float liveness_score = 0.0f;
 };
 
 struct MqttDeviceCredential {
@@ -147,6 +152,7 @@ private:
     const std::string serial_number_;
     const std::string device_model_;
     const std::string firmware_version_;
+    const int status_interval_seconds_;
     const std::string device_secret_;
     const std::string credential_path_;
     const std::string offline_queue_path_;
@@ -162,6 +168,7 @@ private:
     std::string pending_uuid_;
     std::string provisioning_response_topic_;
     std::chrono::steady_clock::time_point next_status_check_;
+    std::chrono::steady_clock::time_point next_status_publish_;
     const bool include_image_base64_;
 
     std::atomic<bool> running_;

@@ -5,7 +5,7 @@
 //
 // Layout on disk (binary, little-endian):
 //   4 bytes  : int32  count
-//   count × (FACE_DB_NAME_LEN + FACE_DB_EMBED_DIM × 4) bytes : entries
+//   count × sizeof(face_entry_t) bytes : entries
 //
 // Thread-safety: not thread-safe; single-threaded use only.
 
@@ -17,12 +17,16 @@ extern "C" {
 #define FACE_DB_NAME_LEN    64
 #define FACE_DB_SEX_LEN     16
 #define FACE_DB_CCCD_LEN    32
+#define FACE_DB_EMPLOYEE_ID_LEN 64
+#define FACE_DB_COMPANY_ID_LEN  64
 #define FACE_DB_EMBED_DIM   128
 
 typedef struct {
     char  name[FACE_DB_NAME_LEN];   /* null-terminated display name */
     char  sex[FACE_DB_SEX_LEN];
     char  cccd[FACE_DB_CCCD_LEN];
+    char  employee_id[FACE_DB_EMPLOYEE_ID_LEN];
+    char  company_id[FACE_DB_COMPANY_ID_LEN];
     float embedding[FACE_DB_EMBED_DIM];
 } face_entry_t;
 
@@ -47,6 +51,8 @@ int face_db_add_with_info(face_db_t *db,
                           const char *name,
                           const char *sex,
                           const char *cccd,
+                          const char *employee_id,
+                          const char *company_id,
                           const float *embedding);
 
 /* Find the closest registered face.
