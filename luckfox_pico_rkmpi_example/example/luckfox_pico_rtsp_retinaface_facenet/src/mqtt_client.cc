@@ -683,14 +683,12 @@ void MqttClient::handleRegisterRequest(const std::string& payload)
     request.timestamp = jsonGetString(payload, "timestamp");
     request.device_id = jsonGetString(payload, "device_id");
     request.command = jsonGetString(payload, "command");
-    request.face_link = jsonGetString(payload, "face_link");
+    request.employee_id = jsonGetString(payload, "employee_id");
     request.name = jsonGetString(payload, "name");
     if (request.name.empty())
         request.name = jsonGetString(payload, "person_name");
-    request.sex = jsonGetString(payload, "sex");
-    request.cccd = jsonGetString(payload, "cccd");
-    request.employee_id = jsonGetString(payload, "employee_id");
-    request.company_id = jsonGetString(payload, "company_id");
+    request.face_link = jsonGetString(payload, "face_link");
+    request.audio_link = jsonGetString(payload, "audio_link");
 
     RegisterFaceResponse response;
     if (request.command != "register_face") {
@@ -832,12 +830,10 @@ std::string MqttClient::buildRegisterResponse(
     out << "\"message\":\"" << jsonEscape(response.message) << "\",";
     out << "\"status\":" << (response.status ? "true" : "false") << ",";
     out << "\"data\":{";
-    out << "\"face_link\":\"" << jsonEscape(request.face_link) << "\",";
-    out << "\"name\":\"" << jsonEscape(request.name) << "\",";
-    out << "\"sex\":\"" << jsonEscape(request.sex) << "\",";
-    out << "\"cccd\":\"" << jsonEscape(request.cccd) << "\",";
     out << "\"employee_id\":\"" << jsonEscape(request.employee_id) << "\",";
-    out << "\"company_id\":\"" << jsonEscape(request.company_id) << "\"";
+    out << "\"name\":\"" << jsonEscape(request.name) << "\",";
+    out << "\"face_link\":\"" << jsonEscape(request.face_link) << "\",";
+    out << "\"audio_link\":\"" << jsonEscape(request.audio_link) << "\"";
     out << "}}";
     return out.str();
 }
@@ -867,7 +863,6 @@ std::string MqttClient::buildRecognitionEvent(
         out << "\"person_id\":\"" << jsonEscape(payload.person_id) << "\",";
         out << "\"person_name\":\"" << jsonEscape(payload.name) << "\",";
         out << "\"employee_id\":\"" << jsonEscape(payload.employee_id) << "\",";
-        out << "\"company_id\":\"" << jsonEscape(payload.company_id) << "\",";
         out << "\"confidence\":" << payload.confidence << ",";
         out << "\"distance\":" << payload.distance << ",";
         out << "\"liveness_score\":" << payload.liveness_score << ",";
@@ -885,7 +880,6 @@ std::string MqttClient::buildRecognitionEvent(
         out << "\"name\":\"" << jsonEscape(payload.name) << "\",";
         out << "\"person_id\":\"" << jsonEscape(payload.person_id) << "\",";
         out << "\"employee_id\":\"" << jsonEscape(payload.employee_id) << "\",";
-        out << "\"company_id\":\"" << jsonEscape(payload.company_id) << "\",";
         out << "\"time\":\"" << jsonEscape(payload.time) << "\",";
         out << "\"confidence\":" << payload.confidence << ",";
         out << "\"distance\":" << payload.distance;

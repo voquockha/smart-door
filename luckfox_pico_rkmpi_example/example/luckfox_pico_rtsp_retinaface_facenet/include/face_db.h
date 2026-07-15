@@ -15,18 +15,14 @@ extern "C" {
 
 #define FACE_DB_MAX_ENTRIES 64
 #define FACE_DB_NAME_LEN    64
-#define FACE_DB_SEX_LEN     16
-#define FACE_DB_CCCD_LEN    32
 #define FACE_DB_EMPLOYEE_ID_LEN 64
-#define FACE_DB_COMPANY_ID_LEN  64
+#define FACE_DB_AUDIO_PATH_LEN  256
 #define FACE_DB_EMBED_DIM   128
 
 typedef struct {
     char  name[FACE_DB_NAME_LEN];   /* null-terminated display name */
-    char  sex[FACE_DB_SEX_LEN];
-    char  cccd[FACE_DB_CCCD_LEN];
     char  employee_id[FACE_DB_EMPLOYEE_ID_LEN];
-    char  company_id[FACE_DB_COMPANY_ID_LEN];
+    char  audio_path[FACE_DB_AUDIO_PATH_LEN];
     float embedding[FACE_DB_EMBED_DIM];
 } face_entry_t;
 
@@ -46,13 +42,11 @@ int face_db_save(const face_db_t *db, const char *path);
 /* Append a new entry.  Returns 0 on success, -1 if the database is full. */
 int face_db_add(face_db_t *db, const char *name, const float *embedding);
 
-/* Append a new entry with optional metadata. */
+/* Add an entry, or update the existing entry with the same employee_id. */
 int face_db_add_with_info(face_db_t *db,
                           const char *name,
-                          const char *sex,
-                          const char *cccd,
                           const char *employee_id,
-                          const char *company_id,
+                          const char *audio_path,
                           const float *embedding);
 
 /* Find the closest registered face.

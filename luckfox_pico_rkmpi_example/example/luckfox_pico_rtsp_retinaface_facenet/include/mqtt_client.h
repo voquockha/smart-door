@@ -13,12 +13,10 @@ struct RegisterFaceRequest {
     std::string timestamp;
     std::string device_id;
     std::string command;
-    std::string face_link;
-    std::string name;
-    std::string sex;
-    std::string cccd;
     std::string employee_id;
-    std::string company_id;
+    std::string name;
+    std::string face_link;
+    std::string audio_link;
 };
 
 struct RegisterFaceResponse {
@@ -30,7 +28,6 @@ struct MqttRecognitionPayload {
     std::string person_id;
     std::string name;
     std::string employee_id;
-    std::string company_id;
     std::string time;
     std::string image_path;
     float confidence = 0.0f;

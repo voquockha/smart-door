@@ -60,12 +60,10 @@ Format `register_face` local:
   "device_id": "mac eth0",
   "command": "register_face",
   "data": {
-    "face_link": "https://example.com/person.jpg",
-    "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890",
     "employee_id": "vnpt_001",
-    "company_id": "vnpt"
+    "name": "Nguyen Van A",
+    "face_link": "https://example.com/person.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
@@ -81,15 +79,33 @@ Response local:
   "message": "register success",
   "status": true,
   "data": {
-    "face_link": "https://example.com/person.jpg",
-    "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890",
     "employee_id": "vnpt_001",
-    "company_id": "vnpt"
+    "name": "Nguyen Van A",
+    "face_link": "https://example.com/person.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
+
+Bốn field trong `data` đều bắt buộc. `audio_link` có thể là URL HTTP/HTTPS
+hoặc file local; firmware chuyển audio về WAV PCM mono 16 kHz và lưu theo
+`FACE_AUDIO_DIR/<employee_id>.wav`.
+Nếu `employee_id` đã tồn tại, firmware cập nhật bản ghi và audio thay vì tạo
+nhân viên trùng.
+
+Khi điểm danh thành công, thiết bị phát tuần tự file chào rồi file nhân viên.
+Cấu hình mặc định/tùy chọn:
+
+```bash
+export FACE_AUDIO_DIR=/root/kha/audio
+export ATTENDANCE_GREETING_AUDIO=/root/kha/audio/xinchao.wav
+export ATTENDANCE_AUDIO_PLAYER=/usr/bin/aplay
+export ATTENDANCE_AUDIO_ENABLED=1
+export ATTENDANCE_COOLDOWN_SECONDS=60
+```
+
+`ATTENDANCE_COOLDOWN_SECONDS` áp dụng riêng cho từng nhân viên, ngăn gửi lặp
+event lên server và phát lặp audio trong khoảng thời gian cấu hình.
 
 Event nhận diện local:
 
@@ -108,8 +124,7 @@ Event nhận diện local:
     "time": "2026-07-10 08:10:00",
     "confidence": 0.91,
     "distance": 0.42,
-    "employee_id": "vnpt_001",
-    "company_id": "vnpt"
+    "employee_id": "vnpt_001"
   }
 }
 ```
@@ -684,10 +699,10 @@ Payload hiện firmware đang hỗ trợ:
   "device_id": "dev_8f3a91c2",
   "command": "register_face",
   "data": {
-    "face_link": "https://example.com/person.jpg",
+    "employee_id": "vnpt_001",
     "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890"
+    "face_link": "https://example.com/person.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
@@ -709,10 +724,10 @@ Payload:
   "message": "register success",
   "status": true,
   "data": {
-    "face_link": "https://example.com/person.jpg",
+    "employee_id": "vnpt_001",
     "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890"
+    "face_link": "https://example.com/person.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
@@ -728,10 +743,10 @@ Lỗi:
   "message": "no face detected",
   "status": false,
   "data": {
-    "face_link": "https://example.com/person.jpg",
+    "employee_id": "vnpt_001",
     "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890"
+    "face_link": "https://example.com/person.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
@@ -757,6 +772,7 @@ Payload khi production:
   "data": {
     "person_id": "user_001",
     "person_name": "Nguyen Van A",
+    "employee_id": "vnpt_001",
     "confidence": 0.91,
     "distance": 0.42,
     "camera_id": "cam_001",
@@ -799,6 +815,8 @@ INVALID_CREDENTIAL
 UNSUPPORTED_COMMAND
 NO_FACE_DETECTED
 DOWNLOAD_FACE_FAILED
+DOWNLOAD_AUDIO_FAILED
+AUDIO_CONVERSION_FAILED
 DATABASE_FULL
 ```
 

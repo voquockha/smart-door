@@ -26,7 +26,7 @@ struct FaceResult {
     std::string person_id;
     std::string name;
     std::string employee_id;
-    std::string company_id;
+    std::string audio_path;
     float confidence = 0.0f;
     float distance = -1.0f;
 
@@ -45,7 +45,7 @@ struct AttendanceJson {
     std::string user_id;
     std::string name;
     std::string employee_id;
-    std::string company_id;
+    std::string audio_path;
     std::string time;
     float confidence = 0.0f;
     float distance = -1.0f;
@@ -110,6 +110,7 @@ private:
     bool saveImage(Frame frame, std::string path);
     bool saveMetadata(AttendanceJson data, std::string path);
     bool sendToServer(AttendanceJson data);
+    void playAttendanceAudio(const AttendanceJson& data);
 
     void workerLoop();
     void processWorkItem(WorkItem item);
@@ -149,6 +150,9 @@ private:
     const int server_port_;
     const std::string server_path_;
     const bool save_images_;
+    const bool audio_enabled_;
+    const std::string greeting_audio_path_;
+    const std::string audio_player_path_;
     std::string queue_dir_;
     std::string queue_path_;
 

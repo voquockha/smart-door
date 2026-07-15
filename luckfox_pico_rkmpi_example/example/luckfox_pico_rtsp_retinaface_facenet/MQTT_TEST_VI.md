@@ -210,12 +210,10 @@ mosquitto_pub -h 127.0.0.1 \
     "device_id": "mac eth0",
     "command": "register_face",
     "data": {
-      "face_link": "https://leonard-tagged-specify-warming.trycloudflare.com/voquockha.png",
-      "name": "Vo Quoc Kha",
-      "sex": "Nam",
-      "cccd": "999999991",
       "employee_id": "vnpt_001",
-      "company_id": "vnpt"
+      "name": "Vo Quoc Kha",
+      "face_link": "https://leonard-tagged-specify-warming.trycloudflare.com/voquockha.png",
+      "audio_link": "https://example.com/voquockha.mp3"
     }
   }'
 ```
@@ -224,6 +222,25 @@ mosquitto_pub -h 127.0.0.1 \
 
 - URL HTTP/HTTPS.
 - Đường dẫn file local trên thiết bị, ví dụ `/data/faces/a.jpg`.
+
+`audio_link` cũng có thể là URL HTTP/HTTPS hoặc file local. Firmware dùng
+`ffmpeg` chuyển về WAV PCM mono 16 kHz và lưu tại
+`FACE_AUDIO_DIR/<employee_id>.wav`.
+Đăng ký lại cùng `employee_id` sẽ cập nhật bản ghi hiện có.
+
+Đặt file chào và cấu hình cooldown trước khi chạy:
+
+```bash
+mkdir -p /root/kha/audio
+# Chép xinchao.wav vào /root/kha/audio/xinchao.wav
+export FACE_AUDIO_DIR=/root/kha/audio
+export ATTENDANCE_GREETING_AUDIO=/root/kha/audio/xinchao.wav
+export ATTENDANCE_AUDIO_ENABLED=1
+export ATTENDANCE_COOLDOWN_SECONDS=60
+```
+
+Trong 60 giây, mỗi `person_id` chỉ sinh một event điểm danh và một lần phát
+`xinchao.wav` + audio nhân viên.
 
 Response thành công:
 
@@ -236,12 +253,10 @@ Response thành công:
   "message": "register success",
   "status": true,
   "data": {
-    "face_link": "https://example.com/face.jpg",
-    "name": "Nguyen Van A",
-    "sex": "Nam",
-    "cccd": "1234567890",
     "employee_id": "vnpt_001",
-    "company_id": "vnpt"
+    "name": "Nguyen Van A",
+    "face_link": "https://example.com/face.jpg",
+    "audio_link": "https://example.com/audio.mp3"
   }
 }
 ```
@@ -252,6 +267,15 @@ Một số response lỗi có thể gặp:
 {
   "command": "register_face",
   "message": "face_link is empty",
+  "status": false,
+  "data": {}
+}
+```
+
+```json
+{
+  "command": "register_face",
+  "message": "audio_link is empty",
   "status": false,
   "data": {}
 }
@@ -298,7 +322,6 @@ Payload hiện tại:
     "name": "Nguyen Van A",
     "person_id": "user_001",
     "employee_id": "vnpt_001",
-    "company_id": "vnpt",
     "time": "2026-07-09 14:40:00",
     "confidence": 0.91,
     "distance": 0.42,
@@ -321,7 +344,7 @@ Sau khi đăng ký thành công, log sẽ in:
 
 ```text
 [face_db] 1 registered face(s):
-  [0] Nguyen Van A sex=Nam cccd=1234567890 employee_id=vnpt_001 company_id=vnpt
+  [0] Nguyen Van A employee_id=vnpt_001 audio=/root/kha/audio/vnpt_001.wav
 ```
 
 File DB nằm ở path truyền vào lệnh run, ví dụ:
@@ -330,9 +353,8 @@ File DB nằm ở path truyền vào lệnh run, ví dụ:
 face_db.bin
 ```
 
-DB mới có thêm metadata `sex`, `cccd`, `employee_id` và `company_id`, nhưng
-code vẫn đọc được cả DB cũ chỉ có `name + embedding` và DB có
-`name + sex + cccd + embedding`.
+DB mới lưu `name`, `employee_id`, đường dẫn audio local và embedding. Code vẫn
+đọc được DB cũ; các trường metadata cũ được bỏ qua khi migrate.
 
 ## 10. Troubleshooting
 
@@ -368,12 +390,10 @@ mosquitto_pub -h 127.0.0.1 \
     "device_id": "mac eth0",
     "command": "register_face",
     "data": {
-      "face_link": "/data/faces/test.jpg",
-      "name": "Test User",
-      "sex": "Nam",
-      "cccd": "0000000000",
       "employee_id": "test_001",
-      "company_id": "test_company"
+      "name": "Test User",
+      "face_link": "/data/faces/test.jpg",
+      "audio_link": "/data/audio/test_user.wav"
     }
   }'
 ```
@@ -757,7 +777,6 @@ Payload event mục tiêu:
     "person_id": "EMP001",
     "person_name": "Nguyen Van A",
     "employee_id": "vnpt_001",
-    "company_id": "vnpt",
     "confidence": 0.91,
     "camera_id": "cam_001",
     "capture_time": "2026-07-09T14:40:00Z",

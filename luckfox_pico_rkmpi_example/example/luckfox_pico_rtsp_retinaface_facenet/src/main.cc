@@ -28,6 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
@@ -126,7 +128,6 @@ static void publishAttendanceMqtt(MqttClient& mqtt,
     payload.person_id = data.user_id;
     payload.name = data.name;
     payload.employee_id = data.employee_id;
-    payload.company_id = data.company_id;
     payload.time = data.time;
     payload.image_path = image_path;
     payload.confidence = data.confidence;
@@ -177,6 +178,166 @@ static size_t write_file_callback(char *ptr,
     return fwrite(ptr, size, nmemb, fp);
 }
 
+static bool ensure_directory(const std::string& path)
+{
+    if (path.empty())
+        return false;
+
+    std::string partial;
+    partial.reserve(path.size());
+    for (size_t i = 0; i < path.size(); ++i) {
+        partial.push_back(path[i]);
+        if (path[i] != '/' || partial.size() == 1)
+            continue;
+        if (mkdir(partial.c_str(), 0755) != 0 && errno != EEXIST)
+            return false;
+    }
+    if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST)
+        return false;
+
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool download_http_file(const std::string& url,
+                               const std::string& path,
+                               std::string *error)
+{
+    FILE *fp = fopen(path.c_str(), "wb");
+    if (!fp) {
+        *error = "cannot create download file";
+        return false;
+    }
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        fclose(fp);
+        unlink(path.c_str());
+        *error = "curl_easy_init failed";
+        return false;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "luckfox-face-mqtt/1.0");
+    if (env_bool("MQTT_FACE_ALLOW_INSECURE", false)) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+
+    const CURLcode code = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    fclose(fp);
+
+    if (code != CURLE_OK || http_code < 200 || http_code >= 300) {
+        unlink(path.c_str());
+        *error = std::string("download failed: ") + curl_easy_strerror(code) +
+                 " http=" + std::to_string(http_code);
+        return false;
+    }
+    return true;
+}
+
+static bool convert_to_wav(const std::string& input_path,
+                           const std::string& output_path,
+                           std::string *error)
+{
+    const char *configured = getenv("FACE_AUDIO_FFMPEG");
+    const char *ffmpeg = configured && *configured
+        ? configured : "/usr/bin/ffmpeg";
+    const pid_t pid = fork();
+    if (pid < 0) {
+        *error = std::string("cannot start ffmpeg: ") + strerror(errno);
+        return false;
+    }
+    if (pid == 0) {
+        execl(ffmpeg, ffmpeg, "-loglevel", "error", "-y",
+              "-i", input_path.c_str(), "-vn", "-ac", "1",
+              "-ar", "16000", "-c:a", "pcm_s16le",
+              output_path.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        *error = std::string("wait ffmpeg failed: ") + strerror(errno);
+        return false;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        *error = "audio conversion failed";
+        return false;
+    }
+    return true;
+}
+
+static bool download_employee_audio(const RegisterFaceRequest& request,
+                                    std::string *audio_path,
+                                    std::string *error)
+{
+    if (!audio_path || !error)
+        return false;
+    if (request.audio_link.empty()) {
+        *error = "audio_link is empty";
+        return false;
+    }
+
+    const char *configured_dir = getenv("FACE_AUDIO_DIR");
+    const std::string audio_dir = configured_dir && *configured_dir
+        ? configured_dir : "/root/kha/audio";
+    if (!ensure_directory(audio_dir)) {
+        *error = "cannot create face audio directory";
+        return false;
+    }
+
+    const std::string token = safe_token(request.employee_id);
+    std::string input_path = request.audio_link;
+    bool remove_input = false;
+    if (starts_with(request.audio_link, "http://") ||
+        starts_with(request.audio_link, "https://")) {
+        static std::once_flag curl_once;
+        std::call_once(curl_once, []() {
+            curl_global_init(CURL_GLOBAL_DEFAULT);
+        });
+        input_path = "/tmp/mqtt_register_audio_" +
+                     safe_token(request.uuid) + ".input";
+        if (!download_http_file(request.audio_link, input_path, error))
+            return false;
+        remove_input = true;
+    } else if (access(input_path.c_str(), R_OK) != 0) {
+        *error = "audio source is not readable";
+        return false;
+    }
+
+    const std::string final_path = audio_dir + "/" + token + ".wav";
+    const std::string temp_path = final_path + ".tmp.wav";
+    unlink(temp_path.c_str());
+    const bool converted = convert_to_wav(input_path, temp_path, error);
+    if (remove_input)
+        unlink(input_path.c_str());
+    if (!converted) {
+        unlink(temp_path.c_str());
+        return false;
+    }
+    if (rename(temp_path.c_str(), final_path.c_str()) != 0) {
+        unlink(temp_path.c_str());
+        *error = std::string("cannot save employee audio: ") +
+                 strerror(errno);
+        return false;
+    }
+
+    *audio_path = final_path;
+    return true;
+}
+
 static bool download_face_image(const RegisterFaceRequest& request,
                                 std::string *local_path,
                                 std::string *error)
@@ -202,45 +363,8 @@ static bool download_face_image(const RegisterFaceRequest& request,
 
     const std::string path =
         "/tmp/mqtt_register_face_" + safe_token(request.uuid) + ".jpg";
-    FILE *fp = fopen(path.c_str(), "wb");
-    if (!fp) {
-        *error = "cannot create temp image file";
+    if (!download_http_file(request.face_link, path, error))
         return false;
-    }
-
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        fclose(fp);
-        unlink(path.c_str());
-        *error = "curl_easy_init failed";
-        return false;
-    }
-
-    curl_easy_setopt(curl, CURLOPT_URL, request.face_link.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "luckfox-face-mqtt/1.0");
-    if (env_bool("MQTT_FACE_ALLOW_INSECURE", false)) {
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    }
-
-    CURLcode code = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
-    fclose(fp);
-
-    if (code != CURLE_OK || http_code < 200 || http_code >= 300) {
-        unlink(path.c_str());
-        *error = std::string("download failed: ") + curl_easy_strerror(code) +
-                 " http=" + std::to_string(http_code);
-        return false;
-    }
 
     *local_path = path;
     return true;
@@ -572,9 +696,19 @@ static int do_run(const char *retina_model_path,
                 response.message = "name is empty";
                 return response;
             }
+            if (request.employee_id.empty()) {
+                response.status = false;
+                response.message = "employee_id is empty";
+                return response;
+            }
             if (request.face_link.empty()) {
                 response.status = false;
                 response.message = "face_link is empty";
+                return response;
+            }
+            if (request.audio_link.empty()) {
+                response.status = false;
+                response.message = "audio_link is empty";
                 return response;
             }
 
@@ -606,12 +740,19 @@ static int do_run(const char *retina_model_path,
                 return response;
             }
 
+            std::string employee_audio_path;
+            if (!download_employee_audio(request, &employee_audio_path,
+                                         &error)) {
+                response.status = false;
+                response.message = error;
+                return response;
+            }
+
             {
                 std::lock_guard<std::mutex> lock(db_mutex);
                 int add_ret = face_db_add_with_info(
-                    &db, request.name.c_str(), request.sex.c_str(),
-                    request.cccd.c_str(), request.employee_id.c_str(),
-                    request.company_id.c_str(), embedding);
+                    &db, request.name.c_str(), request.employee_id.c_str(),
+                    employee_audio_path.c_str(), embedding);
                 if (add_ret != 0) {
                     response.status = false;
                     response.message = "database full";
@@ -851,7 +992,7 @@ static int do_run(const char *retina_model_path,
                 float  dist;
                 int    idx;
                 std::string employee_id;
-                std::string company_id;
+                std::string audio_path;
                 {
                     std::lock_guard<std::mutex> db_lock(db_mutex);
                     idx = face_db_find(&db, face_fp32, &dist);
@@ -860,7 +1001,7 @@ static int do_run(const char *retina_model_path,
                                 FACE_DB_NAME_LEN - 1);
                         face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
                         employee_id = db.entries[idx].employee_id;
-                        company_id = db.entries[idx].company_id;
+                        audio_path = db.entries[idx].audio_path;
                     }
                 }
                 face_dists[i] = dist;
@@ -881,7 +1022,7 @@ static int do_run(const char *retina_model_path,
                     event_result.person_id = face_ids[i];
                     event_result.name = face_names[i];
                     event_result.employee_id = employee_id;
-                    event_result.company_id = company_id;
+                    event_result.audio_path = audio_path;
                     event_result.confidence = face_confidences[i];
                     event_result.distance = face_dists[i];
                     event_result.liveness_verified = true;

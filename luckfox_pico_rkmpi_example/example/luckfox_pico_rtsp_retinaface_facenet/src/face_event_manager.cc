@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -25,10 +26,53 @@
 
 namespace {
 constexpr float kDefaultConfidenceThreshold = 0.80f;
-constexpr int kDefaultCooldownSeconds = 10;
+constexpr int kDefaultCooldownSeconds = 60;
 constexpr size_t kDefaultQueueCapacity = 32;
 constexpr int kHttpTimeoutMs = 3000;
 constexpr int kRetryIntervalSeconds = 10;
+
+int getEnvIntClamped(const char* name, int fallback,
+                     int minimum, int maximum)
+{
+    const char* value = getenv(name);
+    if (!value || !*value)
+        return fallback;
+    char* end = nullptr;
+    const long parsed = strtol(value, &end, 10);
+    if (!end || *end != '\0' || parsed < minimum || parsed > maximum) {
+        printf("[config] invalid %s=%s, use %d\n", name, value, fallback);
+        return fallback;
+    }
+    return (int)parsed;
+}
+
+bool playWavFile(const std::string& player, const std::string& path)
+{
+    if (path.empty() || access(path.c_str(), R_OK) != 0) {
+        printf("[audio] file not readable: %s\n", path.c_str());
+        return false;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        printf("[audio] fork failed: %s\n", strerror(errno));
+        return false;
+    }
+    if (pid == 0) {
+        execl(player.c_str(), player.c_str(), "-q", path.c_str(),
+              (char*)nullptr);
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        printf("[audio] waitpid failed: %s\n", strerror(errno));
+        return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 
 bool sendAll(int fd, const char* data, size_t len)
 {
@@ -93,7 +137,8 @@ void FaceEventManager::ThreadSafeQueue<T>::shutdown()
 
 FaceEventManager::FaceEventManager(bool require_liveness)
     : confidence_threshold_(kDefaultConfidenceThreshold),
-      cooldown_seconds_(kDefaultCooldownSeconds),
+      cooldown_seconds_(getEnvIntClamped("ATTENDANCE_COOLDOWN_SECONDS",
+                                         kDefaultCooldownSeconds, 0, 86400)),
       require_liveness_(require_liveness),
       requested_base_dir_(
           getEnvOrDefault("ATTENDANCE_BASE_DIR", "/data/attendance")),
@@ -104,11 +149,19 @@ FaceEventManager::FaceEventManager(bool require_liveness)
                                         "8080").c_str())),
       server_path_(getEnvOrDefault("ATTENDANCE_SERVER_PATH", "/attendance")),
       save_images_(getEnvBool("ATTENDANCE_SAVE_IMAGE", true)),
+      audio_enabled_(getEnvBool("ATTENDANCE_AUDIO_ENABLED", true)),
+      greeting_audio_path_(getEnvOrDefault(
+          "ATTENDANCE_GREETING_AUDIO", "/root/kha/audio/xinchao.wav")),
+      audio_player_path_(getEnvOrDefault(
+          "ATTENDANCE_AUDIO_PLAYER", "/usr/bin/aplay")),
       work_queue_(kDefaultQueueCapacity),
       running_(true)
 {
     printf("[liveness] passive RKNN gate: %s\n",
            require_liveness_ ? "required" : "disabled (test mode only)");
+    printf("[attendance] cooldown=%d seconds audio=%s greeting=%s\n",
+           cooldown_seconds_, audio_enabled_ ? "enabled" : "disabled",
+           greeting_audio_path_.c_str());
 
     if (!ensureDirectory(requested_base_dir_) ||
         !isDirectoryWritable(requested_base_dir_)) {
@@ -216,7 +269,7 @@ bool FaceEventManager::handleEvent(Frame frame, FaceResult r)
     data.user_id = r.person_id;
     data.name = r.name;
     data.employee_id = r.employee_id;
-    data.company_id = r.company_id;
+    data.audio_path = r.audio_path;
     data.time = nowTime();
     data.confidence = r.confidence;
     data.distance = r.distance;
@@ -382,6 +435,24 @@ void FaceEventManager::processWorkItem(WorkItem item)
         data_callback(item.data, item.data.image_path);
     else if (data_callback)
         printf("[attendance] Skip image callback because evidence image was not saved\n");
+
+    playAttendanceAudio(item.data);
+}
+
+void FaceEventManager::playAttendanceAudio(const AttendanceJson& data)
+{
+    if (!audio_enabled_)
+        return;
+
+    printf("[audio] attendance greeting for %s\n", data.name.c_str());
+    const bool greeting_ok =
+        playWavFile(audio_player_path_, greeting_audio_path_);
+    const bool employee_ok = playWavFile(audio_player_path_, data.audio_path);
+    if (!greeting_ok || !employee_ok) {
+        printf("[audio] playback incomplete greeting=%s employee=%s\n",
+               greeting_ok ? "ok" : "failed",
+               employee_ok ? "ok" : "failed");
+    }
 }
 
 void FaceEventManager::retryQueuedEvents()
@@ -598,7 +669,6 @@ std::string FaceEventManager::metadataJson(const AttendanceJson& data)
     out << "  \"id\": \"" << jsonEscape(data.user_id) << "\",\n";
     out << "  \"name\": \"" << jsonEscape(data.name) << "\",\n";
     out << "  \"employee_id\": \"" << jsonEscape(data.employee_id) << "\",\n";
-    out << "  \"company_id\": \"" << jsonEscape(data.company_id) << "\",\n";
     out << "  \"time\": \"" << jsonEscape(data.time) << "\",\n";
     out << "  \"confidence\": " << data.confidence << ",\n";
     out << "  \"distance\": " << data.distance << ",\n";
@@ -617,7 +687,6 @@ std::string FaceEventManager::postJson(const AttendanceJson& data)
     out << "\"user_id\":\"" << jsonEscape(data.user_id) << "\",";
     out << "\"name\":\"" << jsonEscape(data.name) << "\",";
     out << "\"employee_id\":\"" << jsonEscape(data.employee_id) << "\",";
-    out << "\"company_id\":\"" << jsonEscape(data.company_id) << "\",";
     out << "\"time\":\"" << jsonEscape(data.time) << "\",";
     out << "\"confidence\":" << data.confidence << ",";
     out << "\"distance\":" << data.distance << ",";
