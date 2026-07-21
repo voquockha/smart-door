@@ -772,6 +772,50 @@ static int do_run(const char *retina_model_path,
                    request.name.c_str(), request.face_link.c_str());
             return response;
         });
+    mqtt.setDeleteHandler(
+        [&](const DeleteFaceRequest& request) -> DeleteFaceResponse {
+            DeleteFaceResponse response;
+            if (request.employee_id.empty()) {
+                response.status = false;
+                response.message = "employee_id is empty";
+                return response;
+            }
+
+            char audio_path[FACE_DB_AUDIO_PATH_LEN]{};
+            {
+                std::lock_guard<std::mutex> lock(db_mutex);
+                const face_db_t backup = db;
+                if (face_db_remove_by_employee_id(
+                        &db, request.employee_id.c_str(), audio_path,
+                        sizeof(audio_path)) != 0) {
+                    response.status = false;
+                    response.message = "employee not found";
+                    return response;
+                }
+                if (face_db_save(&db, db_path) != 0) {
+                    db = backup;
+                    response.status = false;
+                    response.message = "save database failed";
+                    return response;
+                }
+                face_db_print(&db);
+            }
+
+            bool audio_removed = true;
+            if (audio_path[0] != '\0' && unlink(audio_path) != 0 &&
+                errno != ENOENT) {
+                audio_removed = false;
+                printf("[mqtt-delete] cannot remove audio %s: %s\n",
+                       audio_path, strerror(errno));
+            }
+
+            response.status = true;
+            response.message = audio_removed
+                ? "delete success" : "delete success; audio cleanup failed";
+            printf("[mqtt-delete] deleted employee_id=%s audio=%s\n",
+                   request.employee_id.c_str(), audio_path);
+            return response;
+        });
     mqtt.start();
 
     FaceEventManager attendance_events;

@@ -228,19 +228,36 @@ mosquitto_pub -h 127.0.0.1 \
 `FACE_AUDIO_DIR/<employee_id>.wav`.
 Đăng ký lại cùng `employee_id` sẽ cập nhật bản ghi hiện có.
 
-Đặt file chào và cấu hình cooldown trước khi chạy:
+Cấu hình thư mục audio và cooldown trước khi chạy:
 
 ```bash
 mkdir -p /root/kha/audio
-# Chép xinchao.wav vào /root/kha/audio/xinchao.wav
 export FACE_AUDIO_DIR=/root/kha/audio
-export ATTENDANCE_GREETING_AUDIO=/root/kha/audio/xinchao.wav
 export ATTENDANCE_AUDIO_ENABLED=1
 export ATTENDANCE_COOLDOWN_SECONDS=60
 ```
 
 Trong 60 giây, mỗi `person_id` chỉ sinh một event điểm danh và một lần phát
-`xinchao.wav` + audio nhân viên.
+audio nhân viên. Nội dung chào phải được ghép sẵn trong `audio_link`.
+
+Xóa đăng ký theo `employee_id`:
+
+```bash
+mosquitto_pub -h 127.0.0.1 \
+  -t x86-lite/local/device/mac/request \
+  -m '{
+    "uuid": "delete-test-001",
+    "timestamp": "2026-07-09T14:35:00Z",
+    "device_id": "mac eth0",
+    "command": "delete_face",
+    "data": {
+      "employee_id": "vnpt_001"
+    }
+  }'
+```
+
+Thiết bị trả `delete success` khi đã lưu DB và xóa audio, hoặc
+`employee not found` nếu mã nhân viên không tồn tại.
 
 Response thành công:
 

@@ -151,7 +151,6 @@ private:
     const std::string server_path_;
     const bool save_images_;
     const bool audio_enabled_;
-    const std::string greeting_audio_path_;
     const std::string audio_player_path_;
     std::string queue_dir_;
     std::string queue_path_;

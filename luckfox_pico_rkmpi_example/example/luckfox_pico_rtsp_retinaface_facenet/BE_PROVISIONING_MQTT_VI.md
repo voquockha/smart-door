@@ -93,19 +93,52 @@ hoặc file local; firmware chuyển audio về WAV PCM mono 16 kHz và lưu the
 Nếu `employee_id` đã tồn tại, firmware cập nhật bản ghi và audio thay vì tạo
 nhân viên trùng.
 
-Khi điểm danh thành công, thiết bị phát tuần tự file chào rồi file nhân viên.
-Cấu hình mặc định/tùy chọn:
+Khi điểm danh thành công, thiết bị chỉ phát file audio của nhân viên. Nội dung
+chào cần được ghép sẵn trong `audio_link`. Cấu hình:
 
 ```bash
 export FACE_AUDIO_DIR=/root/kha/audio
-export ATTENDANCE_GREETING_AUDIO=/root/kha/audio/xinchao.wav
 export ATTENDANCE_AUDIO_PLAYER=/usr/bin/aplay
 export ATTENDANCE_AUDIO_ENABLED=1
 export ATTENDANCE_COOLDOWN_SECONDS=60
 ```
 
 `ATTENDANCE_COOLDOWN_SECONDS` áp dụng riêng cho từng nhân viên, ngăn gửi lặp
-event lên server và phát lặp audio trong khoảng thời gian cấu hình.
+event lên server và phát lặp audio nhân viên trong khoảng thời gian cấu hình.
+
+Xóa đăng ký khuôn mặt dùng cùng request topic:
+
+```json
+{
+  "uuid": "15d5916f-a239-4d1a-b465-f08d3ada0054",
+  "timestamp": "2026-07-10T08:07:00Z",
+  "device_id": "mac eth0",
+  "command": "delete_face",
+  "data": {
+    "employee_id": "vnpt_001"
+  }
+}
+```
+
+ACK thành công:
+
+```json
+{
+  "uuid": "15d5916f-a239-4d1a-b465-f08d3ada0054",
+  "timestamp": "2026-07-10T08:07:01Z",
+  "device_id": "ee:7b:7f:0a:95:26",
+  "command": "delete_face",
+  "message": "delete success",
+  "status": true,
+  "data": {
+    "employee_id": "vnpt_001"
+  }
+}
+```
+
+Thiết bị tìm `employee_id` không phân biệt chữ hoa/thường, xóa embedding khỏi
+DB và xóa file WAV đã tải. Nếu không tìm thấy, ACK có `status=false` và
+`message="employee not found"`.
 
 Event nhận diện local:
 
@@ -750,6 +783,10 @@ Lỗi:
   }
 }
 ```
+
+Command `delete_face` production cũng publish vào topic
+`devices/{device_uid}/down/command`, với `data.employee_id` như format local;
+ACK trả về topic `devices/{device_uid}/up/ack`.
 
 ## 16. Device gửi event attendance_success
 

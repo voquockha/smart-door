@@ -1,6 +1,8 @@
 #ifndef FACE_DB_H
 #define FACE_DB_H
 
+#include <stddef.h>
+
 // Simple flat-file face database for door-access recognition.
 //
 // Layout on disk (binary, little-endian):
@@ -48,6 +50,14 @@ int face_db_add_with_info(face_db_t *db,
                           const char *employee_id,
                           const char *audio_path,
                           const float *embedding);
+
+/* Remove an entry by employee_id (case-insensitive). The removed audio path
+ * is copied to out_audio_path when a buffer is provided.
+ * Returns 0 on success, -1 when employee_id is not found. */
+int face_db_remove_by_employee_id(face_db_t *db,
+                                  const char *employee_id,
+                                  char *out_audio_path,
+                                  size_t out_audio_path_len);
 
 /* Find the closest registered face.
  * Sets *out_dist to the L2 distance.

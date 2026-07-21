@@ -24,6 +24,19 @@ struct RegisterFaceResponse {
     std::string message;
 };
 
+struct DeleteFaceRequest {
+    std::string uuid;
+    std::string timestamp;
+    std::string device_id;
+    std::string command;
+    std::string employee_id;
+};
+
+struct DeleteFaceResponse {
+    bool status = false;
+    std::string message;
+};
+
 struct MqttRecognitionPayload {
     std::string person_id;
     std::string name;
@@ -57,6 +70,8 @@ class MqttClient {
 public:
     using RegisterHandler =
         std::function<RegisterFaceResponse(const RegisterFaceRequest&)>;
+    using DeleteHandler =
+        std::function<DeleteFaceResponse(const DeleteFaceRequest&)>;
 
     MqttClient();
     ~MqttClient();
@@ -68,6 +83,7 @@ public:
     bool start();
     void stop();
     void setRegisterHandler(RegisterHandler handler);
+    void setDeleteHandler(DeleteHandler handler);
     bool publishRecognition(const MqttRecognitionPayload& payload);
 
 private:
@@ -88,7 +104,7 @@ private:
     bool publishJson(const std::string& topic, const std::string& payload);
     void handlePublish(const std::string& body);
     void handleProvisioningResponse(const std::string& payload);
-    void handleRegisterRequest(const std::string& payload);
+    void handleCommandRequest(const std::string& payload);
     void publishRegisterDevice();
     void publishCheckRegisterStatus();
     bool publishDeviceOnline();
@@ -97,6 +113,8 @@ private:
     void switchToProduction(const MqttDeviceCredential& credential);
     std::string buildRegisterResponse(const RegisterFaceRequest& request,
                                       const RegisterFaceResponse& response);
+    std::string buildDeleteResponse(const DeleteFaceRequest& request,
+                                    const DeleteFaceResponse& response);
     std::string buildRecognitionEvent(const MqttRecognitionPayload& payload);
     std::string buildRegisterDeviceRequest(const std::string& uuid,
                                            const std::string& command);
@@ -178,6 +196,7 @@ private:
 
     std::mutex handler_mutex_;
     RegisterHandler register_handler_;
+    DeleteHandler delete_handler_;
 };
 
 #endif /* MQTT_CLIENT_H */

@@ -150,8 +150,6 @@ FaceEventManager::FaceEventManager(bool require_liveness)
       server_path_(getEnvOrDefault("ATTENDANCE_SERVER_PATH", "/attendance")),
       save_images_(getEnvBool("ATTENDANCE_SAVE_IMAGE", true)),
       audio_enabled_(getEnvBool("ATTENDANCE_AUDIO_ENABLED", true)),
-      greeting_audio_path_(getEnvOrDefault(
-          "ATTENDANCE_GREETING_AUDIO", "/root/kha/audio/xinchao.wav")),
       audio_player_path_(getEnvOrDefault(
           "ATTENDANCE_AUDIO_PLAYER", "/usr/bin/aplay")),
       work_queue_(kDefaultQueueCapacity),
@@ -159,9 +157,8 @@ FaceEventManager::FaceEventManager(bool require_liveness)
 {
     printf("[liveness] passive RKNN gate: %s\n",
            require_liveness_ ? "required" : "disabled (test mode only)");
-    printf("[attendance] cooldown=%d seconds audio=%s greeting=%s\n",
-           cooldown_seconds_, audio_enabled_ ? "enabled" : "disabled",
-           greeting_audio_path_.c_str());
+    printf("[attendance] cooldown=%d seconds audio=%s\n",
+           cooldown_seconds_, audio_enabled_ ? "enabled" : "disabled");
 
     if (!ensureDirectory(requested_base_dir_) ||
         !isDirectoryWritable(requested_base_dir_)) {
@@ -444,15 +441,11 @@ void FaceEventManager::playAttendanceAudio(const AttendanceJson& data)
     if (!audio_enabled_)
         return;
 
-    printf("[audio] attendance greeting for %s\n", data.name.c_str());
-    const bool greeting_ok =
-        playWavFile(audio_player_path_, greeting_audio_path_);
-    const bool employee_ok = playWavFile(audio_player_path_, data.audio_path);
-    if (!greeting_ok || !employee_ok) {
-        printf("[audio] playback incomplete greeting=%s employee=%s\n",
-               greeting_ok ? "ok" : "failed",
-               employee_ok ? "ok" : "failed");
-    }
+    printf("[audio] play employee=%s file=%s\n",
+           data.name.c_str(), data.audio_path.c_str());
+    if (!playWavFile(audio_player_path_, data.audio_path))
+        printf("[audio] employee playback failed: %s\n",
+               data.audio_path.c_str());
 }
 
 void FaceEventManager::retryQueuedEvents()

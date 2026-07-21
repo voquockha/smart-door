@@ -238,6 +238,40 @@ int face_db_add_with_info(face_db_t *db,
     return 0;
 }
 
+int face_db_remove_by_employee_id(face_db_t *db,
+                                  const char *employee_id,
+                                  char *out_audio_path,
+                                  size_t out_audio_path_len)
+{
+    if (out_audio_path && out_audio_path_len > 0)
+        out_audio_path[0] = '\0';
+    if (!db || !employee_id || !employee_id[0])
+        return -1;
+
+    int index = -1;
+    for (int i = 0; i < db->count; ++i) {
+        if (employee_id_equal(db->entries[i].employee_id, employee_id)) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0)
+        return -1;
+
+    if (out_audio_path && out_audio_path_len > 0) {
+        copy_string(out_audio_path, out_audio_path_len,
+                    db->entries[index].audio_path);
+    }
+    if (index + 1 < db->count) {
+        memmove(&db->entries[index], &db->entries[index + 1],
+                (size_t)(db->count - index - 1) * sizeof(face_entry_t));
+    }
+    memset(&db->entries[db->count - 1], 0, sizeof(face_entry_t));
+    --db->count;
+    printf("[face_db] Deleted employee_id=%s\n", employee_id);
+    return 0;
+}
+
 int face_db_find(const face_db_t *db,
                  const float     *embedding,
                  float           *out_dist)

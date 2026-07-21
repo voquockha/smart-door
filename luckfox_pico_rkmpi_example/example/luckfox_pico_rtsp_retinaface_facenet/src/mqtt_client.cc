@@ -342,6 +342,12 @@ void MqttClient::setRegisterHandler(RegisterHandler handler)
     register_handler_ = std::move(handler);
 }
 
+void MqttClient::setDeleteHandler(DeleteHandler handler)
+{
+    std::lock_guard<std::mutex> lock(handler_mutex_);
+    delete_handler_ = std::move(handler);
+}
+
 bool MqttClient::publishRecognition(const MqttRecognitionPayload& payload)
 {
     if (!enabled_)
@@ -601,7 +607,7 @@ void MqttClient::handlePublish(const std::string& body)
     }
 
     if (topic == request_topic_)
-        handleRegisterRequest(payload);
+        handleCommandRequest(payload);
 }
 
 void MqttClient::handleProvisioningResponse(const std::string& payload)
@@ -676,13 +682,38 @@ void MqttClient::handleProvisioningResponse(const std::string& payload)
     switchToProduction(credential);
 }
 
-void MqttClient::handleRegisterRequest(const std::string& payload)
+void MqttClient::handleCommandRequest(const std::string& payload)
 {
+    const std::string command = jsonGetString(payload, "command");
+    if (command == "delete_face") {
+        DeleteFaceRequest request;
+        request.uuid = jsonGetString(payload, "uuid");
+        request.timestamp = jsonGetString(payload, "timestamp");
+        request.device_id = jsonGetString(payload, "device_id");
+        request.command = command;
+        request.employee_id = jsonGetString(payload, "employee_id");
+
+        DeleteFaceResponse response;
+        DeleteHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(handler_mutex_);
+            handler = delete_handler_;
+        }
+        if (!handler) {
+            response.status = false;
+            response.message = "delete handler not ready";
+        } else {
+            response = handler(request);
+        }
+        publishJson(response_topic_, buildDeleteResponse(request, response));
+        return;
+    }
+
     RegisterFaceRequest request;
     request.uuid = jsonGetString(payload, "uuid");
     request.timestamp = jsonGetString(payload, "timestamp");
     request.device_id = jsonGetString(payload, "device_id");
-    request.command = jsonGetString(payload, "command");
+    request.command = command;
     request.employee_id = jsonGetString(payload, "employee_id");
     request.name = jsonGetString(payload, "name");
     if (request.name.empty())
@@ -826,7 +857,10 @@ std::string MqttClient::buildRegisterResponse(
     out << "\"uuid\":\"" << jsonEscape(request.uuid.empty() ? generateUuid() : request.uuid) << "\",";
     out << "\"timestamp\":\"" << jsonEscape(nowIsoUtc()) << "\",";
     out << "\"device_id\":\"" << jsonEscape(device_id_) << "\",";
-    out << "\"command\":\"register_face\",";
+    out << "\"command\":\""
+        << jsonEscape(request.command.empty() ? "register_face"
+                                              : request.command)
+        << "\",";
     out << "\"message\":\"" << jsonEscape(response.message) << "\",";
     out << "\"status\":" << (response.status ? "true" : "false") << ",";
     out << "\"data\":{";
@@ -834,6 +868,26 @@ std::string MqttClient::buildRegisterResponse(
     out << "\"name\":\"" << jsonEscape(request.name) << "\",";
     out << "\"face_link\":\"" << jsonEscape(request.face_link) << "\",";
     out << "\"audio_link\":\"" << jsonEscape(request.audio_link) << "\"";
+    out << "}}";
+    return out.str();
+}
+
+std::string MqttClient::buildDeleteResponse(
+    const DeleteFaceRequest& request,
+    const DeleteFaceResponse& response)
+{
+    std::ostringstream out;
+    out << "{";
+    out << "\"uuid\":\""
+        << jsonEscape(request.uuid.empty() ? generateUuid() : request.uuid)
+        << "\",";
+    out << "\"timestamp\":\"" << jsonEscape(nowIsoUtc()) << "\",";
+    out << "\"device_id\":\"" << jsonEscape(device_id_) << "\",";
+    out << "\"command\":\"delete_face\",";
+    out << "\"message\":\"" << jsonEscape(response.message) << "\",";
+    out << "\"status\":" << (response.status ? "true" : "false") << ",";
+    out << "\"data\":{";
+    out << "\"employee_id\":\"" << jsonEscape(request.employee_id) << "\"";
     out << "}}";
     return out.str();
 }
