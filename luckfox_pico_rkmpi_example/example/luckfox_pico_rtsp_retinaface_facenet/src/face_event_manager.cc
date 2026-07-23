@@ -3,7 +3,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jpeglib.h>
 #include <netdb.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +92,18 @@ bool sendAll(int fd, const char* data, size_t len)
     }
     return true;
 }
+
+struct JpegErrorManager {
+    jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+};
+
+void jpegErrorExit(j_common_ptr info)
+{
+    JpegErrorManager* manager =
+        reinterpret_cast<JpegErrorManager*>(info->err);
+    longjmp(manager->setjmp_buffer, 1);
+}
 }  // namespace
 
 template <typename T>
@@ -144,6 +158,7 @@ FaceEventManager::FaceEventManager(bool require_liveness)
           getEnvOrDefault("ATTENDANCE_BASE_DIR", "/data/attendance")),
       effective_base_dir_(requested_base_dir_),
       camera_id_(getEnvOrDefault("ATTENDANCE_CAMERA_ID", "cam_01")),
+      http_enabled_(getEnvBool("ATTENDANCE_HTTP_ENABLED", true)),
       server_host_(getEnvOrDefault("ATTENDANCE_SERVER_HOST", "127.0.0.1")),
       server_port_(atoi(getEnvOrDefault("ATTENDANCE_SERVER_PORT",
                                         "8080").c_str())),
@@ -157,8 +172,11 @@ FaceEventManager::FaceEventManager(bool require_liveness)
 {
     printf("[liveness] passive RKNN gate: %s\n",
            require_liveness_ ? "required" : "disabled (test mode only)");
-    printf("[attendance] cooldown=%d seconds audio=%s\n",
-           cooldown_seconds_, audio_enabled_ ? "enabled" : "disabled");
+    printf("[attendance] cooldown=%d seconds audio=%s http=%s\n",
+           cooldown_seconds_, audio_enabled_ ? "enabled" : "disabled",
+           http_enabled_ ? "enabled" : "disabled");
+    printf("[attendance] HTTP local sync: %s\n",
+           http_enabled_ ? "enabled" : "disabled");
 
     if (!ensureDirectory(requested_base_dir_) ||
         !isDirectoryWritable(requested_base_dir_)) {
@@ -172,7 +190,8 @@ FaceEventManager::FaceEventManager(bool require_liveness)
 
     queue_dir_ = joinPath(effective_base_dir_, "queue");
     queue_path_ = joinPath(queue_dir_, "attendance_queue.jsonl");
-    ensureDirectory(queue_dir_);
+    if (http_enabled_)
+        ensureDirectory(queue_dir_);
     worker_ = std::thread(&FaceEventManager::workerLoop, this);
 }
 
@@ -277,7 +296,7 @@ bool FaceEventManager::handleEvent(Frame frame, FaceResult r)
     const std::string basename =
         sanitizeFilename(r.name) + "_" + compactTime(data.time);
 
-    data.image_path = joinPath(date_dir, basename + ".bmp");
+    data.image_path = joinPath(date_dir, basename + ".jpg");
 
     WorkItem item;
     item.image_bgr = frame.image_bgr.clone();
@@ -302,20 +321,20 @@ bool FaceEventManager::saveImage(Frame frame, std::string path)
         return false;
     }
 
-    cv::Mat image_for_bmp;
+    cv::Mat image_for_jpeg;
     if (frame.image_bgr.channels() == 3) {
-        // RTSP receives RGB bytes; BMP stores pixels in BGR order.
-        cv::cvtColor(frame.image_bgr, image_for_bmp, cv::COLOR_RGB2BGR);
+        // Despite the historical variable name, frames here contain RGB bytes.
+        image_for_jpeg = frame.image_bgr;
     } else if (frame.image_bgr.channels() == 1) {
-        cv::cvtColor(frame.image_bgr, image_for_bmp, cv::COLOR_GRAY2BGR);
+        cv::cvtColor(frame.image_bgr, image_for_jpeg, cv::COLOR_GRAY2RGB);
     } else {
-        printf("[attendance] Unsupported image channels=%d for BMP: %s\n",
+        printf("[attendance] Unsupported image channels=%d for JPEG: %s\n",
                frame.image_bgr.channels(), path.c_str());
         return false;
     }
 
-    if (!writeBmpFile(path, image_for_bmp)) {
-        printf("[attendance] Failed to write BMP image: %s\n", path.c_str());
+    if (!writeJpegFile(path, image_for_jpeg, 90)) {
+        printf("[attendance] Failed to write JPEG image: %s\n", path.c_str());
         return false;
     }
 
@@ -336,6 +355,8 @@ bool FaceEventManager::saveMetadata(AttendanceJson data, std::string path)
 
 bool FaceEventManager::sendToServer(AttendanceJson data)
 {
+    if (!http_enabled_)
+        return true;
     return httpPost(server_host_, server_port_, server_path_, postJson(data),
                     kHttpTimeoutMs);
 }
@@ -347,7 +368,8 @@ void FaceEventManager::workerLoop()
 
     while (running_) {
         const auto now = std::chrono::steady_clock::now();
-        if (now - last_retry >= std::chrono::seconds(kRetryIntervalSeconds)) {
+        if (http_enabled_ &&
+            now - last_retry >= std::chrono::seconds(kRetryIntervalSeconds)) {
             retryQueuedEvents();
             last_retry = now;
         }
@@ -410,13 +432,18 @@ void FaceEventManager::processWorkItem(WorkItem item)
     }
     saveMetadata(item.data, item.metadata_path);
 
-    if (!sendToServer(item.data)) {
-        enqueueFailedPost(item.post_payload);
-        printf("[attendance] Server send failed, queued: %s\n",
-               item.data.name.c_str());
+    if (http_enabled_) {
+        if (!sendToServer(item.data)) {
+            enqueueFailedPost(item.post_payload);
+            printf("[attendance] Server send failed, queued: %s\n",
+                   item.data.name.c_str());
+        } else {
+            printf("[attendance] Synced event: %s %s\n",
+                   item.data.name.c_str(), item.data.time.c_str());
+        }
     } else {
-        printf("[attendance] Synced event: %s %s\n",
-               item.data.name.c_str(), item.data.time.c_str());
+        printf("[attendance] HTTP local sync disabled, skip queue/post for %s\n",
+               item.data.name.c_str());
     }
 
     AttendanceSuccessCallback callback;
@@ -450,6 +477,9 @@ void FaceEventManager::playAttendanceAudio(const AttendanceJson& data)
 
 void FaceEventManager::retryQueuedEvents()
 {
+    if (!http_enabled_)
+        return;
+
     std::ifstream in(queue_path_.c_str());
     if (!in.good())
         return;
@@ -490,6 +520,9 @@ void FaceEventManager::retryQueuedEvents()
 
 void FaceEventManager::enqueueFailedPost(const std::string& payload)
 {
+    if (!http_enabled_)
+        return;
+
     ensureDirectory(queue_dir_);
     std::ofstream out(queue_path_.c_str(), std::ios::out | std::ios::app);
     if (!out.good()) {
@@ -699,64 +732,53 @@ bool FaceEventManager::writeTextFile(const std::string& path,
     return out.good();
 }
 
-bool FaceEventManager::writeBmpFile(const std::string& path,
-                                    const cv::Mat& image)
+bool FaceEventManager::writeJpegFile(const std::string& path,
+                                     const cv::Mat& image_rgb,
+                                     int quality)
 {
-    if (image.empty() || image.channels() != 3 || image.depth() != CV_8U)
+    if (image_rgb.empty() || image_rgb.channels() != 3 ||
+        image_rgb.depth() != CV_8U) {
         return false;
+    }
 
     FILE* f = fopen(path.c_str(), "wb");
     if (!f)
         return false;
 
-    const int width = image.cols;
-    const int height = image.rows;
-    const int row_stride = ((width * 3 + 3) / 4) * 4;
-    const int pixel_data_size = row_stride * height;
-    const int file_size = 14 + 40 + pixel_data_size;
+    jpeg_compress_struct compressor;
+    JpegErrorManager error;
+    compressor.err = jpeg_std_error(&error.pub);
+    error.pub.error_exit = jpegErrorExit;
 
-    unsigned char file_header[14] = {
-        'B', 'M',
-        (unsigned char)(file_size),
-        (unsigned char)(file_size >> 8),
-        (unsigned char)(file_size >> 16),
-        (unsigned char)(file_size >> 24),
-        0, 0, 0, 0,
-        54, 0, 0, 0
-    };
-
-    unsigned char info_header[40];
-    memset(info_header, 0, sizeof(info_header));
-    info_header[0] = 40;
-    info_header[4] = (unsigned char)(width);
-    info_header[5] = (unsigned char)(width >> 8);
-    info_header[6] = (unsigned char)(width >> 16);
-    info_header[7] = (unsigned char)(width >> 24);
-    info_header[8] = (unsigned char)(height);
-    info_header[9] = (unsigned char)(height >> 8);
-    info_header[10] = (unsigned char)(height >> 16);
-    info_header[11] = (unsigned char)(height >> 24);
-    info_header[12] = 1;
-    info_header[14] = 24;
-    info_header[20] = (unsigned char)(pixel_data_size);
-    info_header[21] = (unsigned char)(pixel_data_size >> 8);
-    info_header[22] = (unsigned char)(pixel_data_size >> 16);
-    info_header[23] = (unsigned char)(pixel_data_size >> 24);
-
-    bool ok = fwrite(file_header, 1, sizeof(file_header), f) ==
-              sizeof(file_header);
-    ok = ok && fwrite(info_header, 1, sizeof(info_header), f) ==
-                 sizeof(info_header);
-
-    std::vector<unsigned char> row((size_t)row_stride, 0);
-    for (int y = height - 1; ok && y >= 0; --y) {
-        const unsigned char* src = image.ptr<unsigned char>(y);
-        memcpy(row.data(), src, (size_t)width * 3);
-        ok = fwrite(row.data(), 1, row.size(), f) == row.size();
+    if (setjmp(error.setjmp_buffer)) {
+        jpeg_destroy_compress(&compressor);
+        fclose(f);
+        unlink(path.c_str());
+        return false;
     }
 
+    jpeg_create_compress(&compressor);
+    jpeg_stdio_dest(&compressor, f);
+    compressor.image_width = (JDIMENSION)image_rgb.cols;
+    compressor.image_height = (JDIMENSION)image_rgb.rows;
+    compressor.input_components = 3;
+    compressor.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&compressor);
+    jpeg_set_quality(&compressor, quality, TRUE);
+    jpeg_start_compress(&compressor, TRUE);
+
+    while (compressor.next_scanline < compressor.image_height) {
+        JSAMPROW row_pointer[1];
+        row_pointer[0] =
+            const_cast<JSAMPROW>(
+                image_rgb.ptr<JSAMPLE>((int)compressor.next_scanline));
+        jpeg_write_scanlines(&compressor, row_pointer, 1);
+    }
+
+    jpeg_finish_compress(&compressor);
+    jpeg_destroy_compress(&compressor);
     fclose(f);
-    return ok;
+    return true;
 }
 
 bool FaceEventManager::isDirectoryWritable(const std::string& path)

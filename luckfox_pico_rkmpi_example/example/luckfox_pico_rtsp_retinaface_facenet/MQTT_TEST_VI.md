@@ -1,5 +1,9 @@
 # Tài liệu MQTT cho LuckFox RetinaFace + FaceNet
 
+> **Lưu ý:** Tài liệu bên dưới mô tả giao thức MQTT cũ và chỉ nên dùng để tham
+> khảo lịch sử. Firmware hiện dùng giao thức X68 Lite; xem
+> [MQTT_X68_LITE_VI.md](MQTT_X68_LITE_VI.md) để cấu hình và kiểm thử.
+
 Tài liệu này mô tả phần MQTT hiện tại trong example
 `luckfox_pico_rtsp_retinaface_facenet`, cách cấu hình, cách test đăng ký gương mặt,
 và flow đăng ký thiết bị mục tiêu để triển khai tiếp.

@@ -132,7 +132,9 @@ private:
     static std::string postJson(const AttendanceJson& data);
     static bool writeTextFile(const std::string& path,
                               const std::string& content);
-    static bool writeBmpFile(const std::string& path, const cv::Mat& image);
+    static bool writeJpegFile(const std::string& path,
+                              const cv::Mat& image_rgb,
+                              int quality);
     static bool isDirectoryWritable(const std::string& path);
     static bool httpPost(const std::string& host,
                          int port,
@@ -146,6 +148,7 @@ private:
     const std::string requested_base_dir_;
     std::string effective_base_dir_;
     const std::string camera_id_;
+    const bool http_enabled_;
     const std::string server_host_;
     const int server_port_;
     const std::string server_path_;

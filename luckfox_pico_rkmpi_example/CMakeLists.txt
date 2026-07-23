@@ -92,9 +92,35 @@ message(STATUS "Found libcurl include: ${CURL_INCLUDE_DIR}")
 message(STATUS "Found libcurl library: ${CURL_LIBRARY}")
 message(STATUS "Found libcurl deps: ${CURL_EXTRA_LIBS}")
 
+find_path(JPEG_INCLUDE_DIR
+          NAMES jpeglib.h
+          PATHS
+              "${SDK_PATH}/project/app/component/third_libs/include/libjpeg9"
+              "${SDK_PATH}/project/app/out/include/libjpeg9"
+              "${SDK_PATH}/output/out/app_out/include/libjpeg9"
+              "${LUCKFOX_BUILDROOT_SYSROOT}/usr/include"
+          NO_DEFAULT_PATH)
+find_library(JPEG_LIBRARY
+             NAMES jpeg libjpeg
+             PATHS
+                 "${SDK_PATH}/project/app/component/third_libs/lib/arm-rockchip830-linux-uclibcgnueabihf"
+                 "${SDK_PATH}/project/app/out/lib"
+                 "${SDK_PATH}/output/out/app_out/lib"
+                 "${LUCKFOX_BUILDROOT_SYSROOT}/usr/lib"
+             NO_DEFAULT_PATH)
+if(NOT JPEG_INCLUDE_DIR OR NOT JPEG_LIBRARY)
+    message(FATAL_ERROR "libjpeg is required for software JPEG evidence images. "
+                        "Missing jpeglib.h or libjpeg.so")
+endif()
+message(STATUS "Found libjpeg include: ${JPEG_INCLUDE_DIR}")
+message(STATUS "Found libjpeg library: ${JPEG_LIBRARY}")
+
 set(SRC_DIR "${EXAMPLE_DIR}/src")
 file(GLOB SRC_FILES "${SRC_DIR}/*.cc")
 add_executable(${PROJECT_NAME} ${SRC_FILES})
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    BUILD_RPATH "$ORIGIN/lib"
+    INSTALL_RPATH "$ORIGIN/lib")
 
 add_compile_options(-g -Wall
                     -DISP_HW_V30 -DRKPLATFORM=ON -DARCH64=OFF
@@ -122,6 +148,7 @@ if(${LIBC_TYPE} STREQUAL "uclibc")
                         rtsp
                         ${CURL_LIBRARY}
                         ${CURL_EXTRA_LIBS}
+                        ${JPEG_LIBRARY}
                         rga
                         )
 elseif(${LIBC_TYPE} STREQUAL "glibc")
@@ -143,6 +170,7 @@ elseif(${LIBC_TYPE} STREQUAL "glibc")
                         dl
                         ${CURL_LIBRARY}
                         ${CURL_EXTRA_LIBS}
+                        ${JPEG_LIBRARY}
                         rga
                         )
 endif()
@@ -150,6 +178,7 @@ endif()
 target_include_directories(${PROJECT_NAME} PRIVATE                        
                             ${OpenCV_INCLUDE_DIRS}
                             ${CURL_INCLUDE_DIR}
+                            ${JPEG_INCLUDE_DIR}
                             ${EXAMPLE_DIR}/include
                             ${CMAKE_CURRENT_SOURCE_DIR}
                             ${CMAKE_CURRENT_SOURCE_DIR}/utils

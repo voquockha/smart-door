@@ -225,7 +225,8 @@ static bool download_http_file(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "luckfox-face-mqtt/1.0");
-    if (env_bool("MQTT_FACE_ALLOW_INSECURE", false)) {
+    const bool verify_file_tls = env_bool("MQTT_FILE_TLS_VERIFY", false);
+    if (env_bool("MQTT_FACE_ALLOW_INSECURE", !verify_file_tls)) {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
@@ -532,6 +533,8 @@ static int do_run(const char *retina_model_path,
                   const char *db_path,
                   const char *anti_spoof_model_path)
 {
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     // -----------------------------------------------------------------------
     // Load face database
     // -----------------------------------------------------------------------
@@ -560,6 +563,7 @@ static int do_run(const char *retina_model_path,
 
     const float scale_x = (float)width  / (float)model_width;
     const float scale_y = (float)height / (float)model_height;
+    const bool bench_log_enabled = env_bool("BENCH_LOG_ENABLED", false);
 
     printf("[run] USE_FACE_ALIGNMENT=%d  threshold=%.2f\n",
            USE_FACE_ALIGNMENT, (double)FACE_DIST_THRESHOLD);
@@ -768,8 +772,8 @@ static int do_run(const char *retina_model_path,
 
             response.status = true;
             response.message = "register success";
-            printf("[mqtt-register] registered %s from %s\n",
-                   request.name.c_str(), request.face_link.c_str());
+            printf("[mqtt-register] registered employee_id=%s\n",
+                   request.employee_id.c_str());
             return response;
         });
     mqtt.setDeleteHandler(
@@ -1157,12 +1161,14 @@ static int do_run(const char *retina_model_path,
             // -----------------------------------------------------------
             struct timespec t_end;
             clock_gettime(CLOCK_MONOTONIC, &t_end);
-            printf("[bench] Retina=%ld us  AntiSpoof=%ld us  Align=%ld us  FaceNet=%ld us"
-                   "  Total=%ld us  Faces=%d\n",
-                   ts_diff_us(t_frame_start, t_retina_done),
-                   anti_spoof_us, align_us, facenet_us,
-                   ts_diff_us(t_frame_start, t_end),
-                   od_results.count);
+            if (bench_log_enabled) {
+                printf("[bench] Retina=%ld us  AntiSpoof=%ld us  Align=%ld us  FaceNet=%ld us"
+                       "  Total=%ld us  Faces=%d\n",
+                       ts_diff_us(t_frame_start, t_retina_done),
+                       anti_spoof_us, align_us, facenet_us,
+                       ts_diff_us(t_frame_start, t_end),
+                       od_results.count);
+            }
         } else {
             RK_LOGE("RK_MPI_VI_GetChnFrame fail %x", s32Ret);
         }

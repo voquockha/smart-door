@@ -1,5 +1,9 @@
 # Tài liệu BE: Provisioning MQTT cho thiết bị LuckFox
 
+> **Lưu ý:** Flow provisioning trong tài liệu này đã được thay bằng giao thức
+> `x68-lite/v1`. Firmware hiện tại được mô tả tại
+> [MQTT_X68_LITE_VI.md](MQTT_X68_LITE_VI.md).
+
 Tài liệu này mô tả logic server/backend cần implement để thiết bị LuckFox:
 
 1. Đăng ký thiết bị lần đầu qua MQTT anonymous.
