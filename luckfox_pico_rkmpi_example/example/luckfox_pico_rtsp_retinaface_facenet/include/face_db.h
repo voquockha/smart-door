@@ -66,6 +66,14 @@ int face_db_find(const face_db_t *db,
                  const float     *embedding,
                  float           *out_dist);
 
+/* Find the closest registered face and also report the runner-up distance.
+ * out_second_dist is set to 9999 when the database has fewer than 2 entries.
+ * The second distance lets callers reject ambiguous nearest-neighbour matches. */
+int face_db_find_best_two(const face_db_t *db,
+                          const float     *embedding,
+                          float           *out_best_dist,
+                          float           *out_second_dist);
+
 /* Print a summary of all registered entries to stdout. */
 void face_db_print(const face_db_t *db);
 

@@ -43,8 +43,35 @@ export ATTENDANCE_AUDIO_PLAYER=/usr/bin/aplay
 export ATTENDANCE_SAVE_IMAGE=1
 export ATTENDANCE_BASE_DIR=/root/attendance
 export ATTENDANCE_COOLDOWN_SECONDS=60
+
+# Nhận diện: distance càng nhỏ càng giống khuôn mặt đã đăng ký.
+export FACE_DIST_THRESHOLD=0.78
+export FACE_MATCH_MARGIN=0.10
+export FACE_MIN_SIZE_PIXELS=100
+export FACE_CONFIRM_FRAMES=3
+export FACE_ENROLL_MIN_SIZE_PIXELS=120
 export ANTI_SPOOF_THRESHOLD=0.85
 ```
+
+Các lớp bảo vệ nhận diện mặc định:
+
+- `FACE_DIST_THRESHOLD=0.78`: từ chối nếu khoảng cách embedding không đủ gần.
+  Giá trị cũ `0.95` quá rộng và có thể nhận nhầm người.
+- `FACE_MATCH_MARGIN=0.10`: nếu kết quả gần nhất và gần nhì trong DB chênh
+  nhau dưới `0.10`, thiết bị coi là mơ hồ và không điểm danh.
+- `FACE_MIN_SIZE_PIXELS=100`: bỏ qua khuôn mặt có chiều rộng hoặc chiều cao
+  dưới 100 pixel trong ảnh camera 720x480; người dùng cần đi lại gần hơn.
+- `FACE_CONFIRM_FRAMES=3`: chỉ phát sinh sự kiện sau khi cùng một danh tính
+  khớp liên tiếp 3 frame.
+- `FACE_ENROLL_MIN_SIZE_PIXELS=120`: ảnh đăng ký phải có đúng một người, khuôn
+  mặt chính diện, không sát mép và rộng/cao ít nhất 120 pixel sau khi resize về
+  640x640. Ảnh không đạt sẽ bị từ chối thay vì ghi embedding kém vào DB.
+
+Khi tinh chỉnh, xem log `[face-match]`. Muốn chặt hơn thì giảm
+`FACE_DIST_THRESHOLD` (ví dụ `0.72`) hoặc tăng `FACE_MATCH_MARGIN`. Không nên
+tăng threshold lại lên `0.95`. Nếu người đúng thường có distance trên `0.78`,
+nên đăng ký lại bằng ảnh chính diện, đủ sáng, chỉ có một người và khuôn mặt lớn
+trước khi cân nhắc tăng nhẹ threshold.
 
 Các giá trị bootstrap mặc định trong firmware là:
 

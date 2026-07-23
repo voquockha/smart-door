@@ -40,6 +40,14 @@ export ATTENDANCE_AUDIO_PLAYER=/usr/bin/aplay
 export ATTENDANCE_SAVE_IMAGE=1
 export ATTENDANCE_BASE_DIR=/root/attendance
 export ATTENDANCE_COOLDOWN_SECONDS=60
+
+# Face recognition safety. Smaller distance is a closer identity match.
+# Reject distant/small faces and require a stable match across several frames.
+export FACE_DIST_THRESHOLD=0.78
+export FACE_MATCH_MARGIN=0.10
+export FACE_MIN_SIZE_PIXELS=100
+export FACE_CONFIRM_FRAMES=3
+export FACE_ENROLL_MIN_SIZE_PIXELS=120
 export ANTI_SPOOF_THRESHOLD=0.85
 
 # Optional Telegram. Leave unset for MQTT-only runtime.

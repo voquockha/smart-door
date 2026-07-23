@@ -276,13 +276,24 @@ int face_db_find(const face_db_t *db,
                  const float     *embedding,
                  float           *out_dist)
 {
+    float second_dist = 9999.0f;
+    return face_db_find_best_two(db, embedding, out_dist, &second_dist);
+}
+
+int face_db_find_best_two(const face_db_t *db,
+                          const float     *embedding,
+                          float           *out_best_dist,
+                          float           *out_second_dist)
+{
     if (db->count == 0) {
-        *out_dist = 9999.0f;
+        *out_best_dist = 9999.0f;
+        *out_second_dist = 9999.0f;
         return -1;
     }
 
     int   best_idx  = 0;
     float best_dist = 9999.0f;
+    float second_dist = 9999.0f;
 
     for (int i = 0; i < db->count; i++) {
         float sum = 0.0f;
@@ -292,12 +303,16 @@ int face_db_find(const face_db_t *db,
         }
         float dist = sqrtf(sum);
         if (dist < best_dist) {
+            second_dist = best_dist;
             best_dist = dist;
             best_idx  = i;
+        } else if (dist < second_dist) {
+            second_dist = dist;
         }
     }
 
-    *out_dist = best_dist;
+    *out_best_dist = best_dist;
+    *out_second_dist = second_dist;
     return best_idx;
 }
 

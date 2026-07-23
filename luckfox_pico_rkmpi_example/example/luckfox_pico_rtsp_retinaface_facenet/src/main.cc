@@ -34,7 +34,9 @@
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
+#include <map>
 #include <mutex>
+#include <set>
 
 #include <curl/curl.h>
 #include "rtsp_demo.h"
@@ -62,7 +64,10 @@
 #define MODEL_HEIGHT        640
 #define FACENET_WIDTH       160
 #define FACENET_HEIGHT      160
-#define FACE_DIST_THRESHOLD 0.95f
+#define FACE_DIST_DEFAULT_THRESHOLD 0.78f
+#define FACE_MATCH_DEFAULT_MARGIN 0.10f
+#define FACE_MIN_DEFAULT_SIZE_PIXELS 100
+#define FACE_CONFIRM_DEFAULT_FRAMES 3
 #define ANTI_SPOOF_DEFAULT_MODEL "model/minifasnet_v2_80x80.rknn"
 #define ANTI_SPOOF_REAL_THRESHOLD 0.80f
 
@@ -76,12 +81,13 @@ static inline long ts_diff_us(const struct timespec& a,
          + (b.tv_nsec - a.tv_nsec) / 1000L;
 }
 
-static inline float confidence_from_face_distance(float dist)
+static inline float confidence_from_face_distance(float dist,
+                                                  float threshold)
 {
-    if (dist >= FACE_DIST_THRESHOLD)
+    if (dist >= threshold)
         return 0.0f;
 
-    float normalized = 1.0f - (dist / FACE_DIST_THRESHOLD);
+    float normalized = 1.0f - (dist / threshold);
     float confidence = 0.80f + 0.20f * normalized;
     return std::max(0.0f, std::min(confidence, 1.0f));
 }
@@ -101,6 +107,27 @@ static float env_float(const char* name, float fallback,
     }
     return parsed;
 }
+
+static int env_int(const char* name, int fallback,
+                   int minimum, int maximum)
+{
+    const char* value = getenv(name);
+    if (!value || !*value)
+        return fallback;
+    char* end = nullptr;
+    const long parsed = strtol(value, &end, 10);
+    if (!end || *end != '\0' || parsed < minimum || parsed > maximum) {
+        printf("[config] invalid %s=%s, use %d\n",
+               name, value, fallback);
+        return fallback;
+    }
+    return (int)parsed;
+}
+
+struct FaceConfirmationState {
+    unsigned long long last_frame = 0;
+    int consecutive_frames = 0;
+};
 
 static void onAttendanceSuccess(const TelegramClient& telegram,
                                 const AttendanceData& data,
@@ -394,7 +421,8 @@ static void print_usage(const char *prog)
 static int compute_embedding(const cv::Mat&      image,
                               rknn_app_context_t* retina_ctx,
                               rknn_app_context_t* facenet_ctx,
-                              float*              out_fp32)
+                              float*              out_fp32,
+                              std::string*        quality_error = nullptr)
 {
     const int mw = MODEL_WIDTH;
     const int mh = MODEL_HEIGHT;
@@ -413,14 +441,57 @@ static int compute_embedding(const cv::Mat&      image,
 
     if (od.count == 0) {
         printf("[embed] No face detected\n");
+        if (quality_error)
+            *quality_error = "no face detected";
+        return -1;
+    }
+    if (od.count != 1) {
+        printf("[embed] Enrollment rejected: expected one face, found %d\n",
+               od.count);
+        if (quality_error)
+            *quality_error = "face image must contain exactly one face";
         return -1;
     }
 
-    // Use highest-confidence detection (first after NMS / score sort)
     object_detect_result *det = &od.results[0];
     printf("[embed] Face detected  conf=%.2f  box=(%d %d %d %d)\n",
            det->prop,
            det->box.left, det->box.top, det->box.right, det->box.bottom);
+
+    const int enroll_min_size = env_int(
+        "FACE_ENROLL_MIN_SIZE_PIXELS", 120, 60, 500);
+    const int box_width = det->box.right - det->box.left;
+    const int box_height = det->box.bottom - det->box.top;
+    const int enroll_edge_margin = 4;
+    if (box_width < enroll_min_size || box_height < enroll_min_size) {
+        printf("[embed] Enrollment rejected: face too small %dx%d "
+               "(minimum %dx%d)\n",
+               box_width, box_height, enroll_min_size, enroll_min_size);
+        if (quality_error)
+            *quality_error = "face is too small; use a closer photo";
+        return -1;
+    }
+    if (det->box.left <= enroll_edge_margin ||
+        det->box.top <= enroll_edge_margin ||
+        det->box.right >= mw - enroll_edge_margin ||
+        det->box.bottom >= mh - enroll_edge_margin) {
+        printf("[embed] Enrollment rejected: face clipped by image edge\n");
+        if (quality_error)
+            *quality_error = "face is clipped by image edge";
+        return -1;
+    }
+
+    const float enroll_eye_span =
+        std::abs((float)det->point[1].x - (float)det->point[0].x);
+    const float enroll_mouth_span =
+        std::abs((float)det->point[4].x - (float)det->point[3].x);
+    if (enroll_eye_span < box_width * 0.18f ||
+        enroll_mouth_span < box_width * 0.14f) {
+        printf("[embed] Enrollment rejected: face is not frontal\n");
+        if (quality_error)
+            *quality_error = "face must look directly at camera";
+        return -1;
+    }
 
 #if USE_FACE_ALIGNMENT
     std::vector<cv::Point2f> lms;
@@ -451,6 +522,8 @@ static int compute_embedding(const cv::Mat&      image,
     int ret = rknn_run(facenet_ctx->rknn_ctx, nullptr);
     if (ret < 0) {
         printf("[embed] rknn_run fail ret=%d\n", ret);
+        if (quality_error)
+            *quality_error = "face embedding inference failed";
         return -1;
     }
 
@@ -564,9 +637,19 @@ static int do_run(const char *retina_model_path,
     const float scale_x = (float)width  / (float)model_width;
     const float scale_y = (float)height / (float)model_height;
     const bool bench_log_enabled = env_bool("BENCH_LOG_ENABLED", false);
+    const float face_dist_threshold = env_float(
+        "FACE_DIST_THRESHOLD", FACE_DIST_DEFAULT_THRESHOLD, 0.40f, 1.20f);
+    const float face_match_margin = env_float(
+        "FACE_MATCH_MARGIN", FACE_MATCH_DEFAULT_MARGIN, 0.0f, 0.50f);
+    const int face_min_size = env_int(
+        "FACE_MIN_SIZE_PIXELS", FACE_MIN_DEFAULT_SIZE_PIXELS, 40, 400);
+    const int face_confirm_frames = env_int(
+        "FACE_CONFIRM_FRAMES", FACE_CONFIRM_DEFAULT_FRAMES, 1, 30);
 
-    printf("[run] USE_FACE_ALIGNMENT=%d  threshold=%.2f\n",
-           USE_FACE_ALIGNMENT, (double)FACE_DIST_THRESHOLD);
+    printf("[run] USE_FACE_ALIGNMENT=%d face threshold=%.2f margin=%.2f "
+           "min_size=%dpx confirm=%d frames\n",
+           USE_FACE_ALIGNMENT, (double)face_dist_threshold,
+           (double)face_match_margin, face_min_size, face_confirm_frames);
 
     // -----------------------------------------------------------------------
     // Init RKNN models
@@ -608,10 +691,13 @@ static int do_run(const char *retina_model_path,
     char  face_ids[128][32];
     char  face_names[128][FACE_DB_NAME_LEN];
     bool  face_liveness_verified[128];
+    bool  face_identity_confirmed[128];
     bool  face_is_spoof[128];
     bool  face_needs_position[128];
     float face_liveness_scores[128];
     std::string face_instructions[128];
+    std::map<std::string, FaceConfirmationState> confirmation_states;
+    unsigned long long recognition_frame = 0;
 
     // -----------------------------------------------------------------------
     // VENC frame buffer
@@ -732,15 +818,18 @@ static int do_run(const char *retina_model_path,
             }
 
             float embedding[FACE_DB_EMBED_DIM];
+            std::string embedding_error;
             int embed_ret = 0;
             {
                 std::lock_guard<std::mutex> lock(model_mutex);
                 embed_ret = compute_embedding(image, &app_retinaface_ctx,
-                                              &app_facenet_ctx, embedding);
+                                              &app_facenet_ctx, embedding,
+                                              &embedding_error);
             }
             if (embed_ret != 0) {
                 response.status = false;
-                response.message = "no face detected";
+                response.message = embedding_error.empty()
+                    ? "face enrollment failed" : embedding_error;
                 return response;
             }
 
@@ -849,6 +938,8 @@ static int do_run(const char *retina_model_path,
         s32Ret = RK_MPI_VI_GetChnFrame(0, 0, &stViFrame, -1);
         bool got_vi_frame = (s32Ret == RK_SUCCESS);
         if (s32Ret == RK_SUCCESS) {
+            ++recognition_frame;
+            std::set<std::string> identities_seen_this_frame;
             void *vi_data = RK_MPI_MB_Handle2VirAddr(stViFrame.stVFrame.pMbBlk);
 
             cv::Mat yuv420sp(height + height / 2, width, CV_8UC1, vi_data);
@@ -884,6 +975,7 @@ static int do_run(const char *retina_model_path,
                 object_detect_result *det = &(od_results.results[i]);
 
                 face_liveness_verified[i] = false;
+                face_identity_confirmed[i] = false;
                 face_is_spoof[i] = false;
                 face_needs_position[i] = false;
                 face_liveness_scores[i] = 0.0f;
@@ -934,6 +1026,23 @@ static int do_run(const char *retina_model_path,
                 }
 
                 const float face_width = (float)std::max(1, eX - sX);
+                const float face_height = (float)std::max(1, eY - sY);
+                if (face_width < face_min_size ||
+                    face_height < face_min_size) {
+                    face_dists[i] = 9999.0f;
+                    face_confidences[i] = 0.0f;
+                    face_ids[i][0] = '\0';
+                    strncpy(face_names[i], "UNKNOWN",
+                            FACE_DB_NAME_LEN - 1);
+                    face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
+                    face_needs_position[i] = true;
+                    face_instructions[i] = "MOVE CLOSER";
+                    printf("[face-quality %d] face too small %.0fx%.0f "
+                           "(minimum %dx%d); recognition skipped\n",
+                           i, (double)face_width, (double)face_height,
+                           face_min_size, face_min_size);
+                    continue;
+                }
                 const float eye_span = std::abs(lm_x[1] - lm_x[0]);
                 const float mouth_span = std::abs(lm_x[4] - lm_x[3]);
                 const bool face_profile =
@@ -1037,14 +1146,21 @@ static int do_run(const char *retina_model_path,
                 output_normalization(&app_facenet_ctx, raw, face_fp32);
 
                 // Match against database
-                float  dist;
-                int    idx;
+                float  dist = 9999.0f;
+                float  second_dist = 9999.0f;
+                int    idx = -1;
                 std::string employee_id;
                 std::string audio_path;
+                bool match_is_ambiguous = false;
                 {
                     std::lock_guard<std::mutex> db_lock(db_mutex);
-                    idx = face_db_find(&db, face_fp32, &dist);
-                    if (idx >= 0 && dist < FACE_DIST_THRESHOLD) {
+                    idx = face_db_find_best_two(
+                        &db, face_fp32, &dist, &second_dist);
+                    match_is_ambiguous =
+                        idx >= 0 && second_dist < 9998.0f &&
+                        second_dist - dist < face_match_margin;
+                    if (idx >= 0 && dist < face_dist_threshold &&
+                        !match_is_ambiguous) {
                         strncpy(face_names[i], db.entries[idx].name,
                                 FACE_DB_NAME_LEN - 1);
                         face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
@@ -1053,9 +1169,11 @@ static int do_run(const char *retina_model_path,
                     }
                 }
                 face_dists[i] = dist;
-                if (idx >= 0 && dist < FACE_DIST_THRESHOLD) {
+                if (idx >= 0 && dist < face_dist_threshold &&
+                    !match_is_ambiguous) {
                     face_confidences[i] =
-                        confidence_from_face_distance(dist);
+                        confidence_from_face_distance(
+                            dist, face_dist_threshold);
                     snprintf(face_ids[i], sizeof(face_ids[i]),
                              "user_%03d", idx + 1);
                 } else {
@@ -1064,7 +1182,46 @@ static int do_run(const char *retina_model_path,
                     face_ids[i][0] = '\0';
                 }
 
+                if (match_is_ambiguous) {
+                    face_instructions[i] = "AMBIGUOUS FACE";
+                    printf("[face-match %d] ambiguous best=%.3f "
+                           "second=%.3f margin=%.3f; rejected\n",
+                           i, (double)dist, (double)second_dist,
+                           (double)(second_dist - dist));
+                } else if (idx >= 0 && dist >= face_dist_threshold) {
+                    printf("[face-match %d] rejected dist=%.3f "
+                           "threshold=%.3f\n",
+                           i, (double)dist,
+                           (double)face_dist_threshold);
+                }
+
                 if (strcmp(face_names[i], "UNKNOWN") != 0) {
+                    const std::string confirmation_key =
+                        employee_id.empty()
+                            ? std::string(face_ids[i])
+                            : employee_id;
+                    FaceConfirmationState& state =
+                        confirmation_states[confirmation_key];
+                    if (identities_seen_this_frame
+                            .insert(confirmation_key).second) {
+                        if (state.last_frame + 1 == recognition_frame)
+                            ++state.consecutive_frames;
+                        else
+                            state.consecutive_frames = 1;
+                        state.last_frame = recognition_frame;
+                    }
+
+                    if (state.consecutive_frames < face_confirm_frames) {
+                        char instruction[48];
+                        snprintf(instruction, sizeof(instruction),
+                                 "VERIFYING %d/%d",
+                                 state.consecutive_frames,
+                                 face_confirm_frames);
+                        face_instructions[i] = instruction;
+                        continue;
+                    }
+                    face_identity_confirmed[i] = true;
+
                     FaceResult event_result;
                     event_result.recognized = true;
                     event_result.person_id = face_ids[i];
@@ -1102,7 +1259,8 @@ static int do_run(const char *retina_model_path,
 
                 bool matched = (strcmp(face_names[i], "UNKNOWN") != 0);
                 matched = matched && !face_is_spoof[i];
-                const bool live = matched && face_liveness_verified[i];
+                const bool live = matched && face_liveness_verified[i] &&
+                                  face_identity_confirmed[i];
                 cv::Scalar color;
                 if (face_is_spoof[i])
                     color = cv::Scalar(255, 0, 255);
@@ -1279,12 +1437,18 @@ static int do_test(const char *retina_model_path,
             onAttendanceSuccess(telegram, data, image_path);
         });
 
+    const float face_dist_threshold = env_float(
+        "FACE_DIST_THRESHOLD", FACE_DIST_DEFAULT_THRESHOLD, 0.40f, 1.20f);
+    const float face_match_margin = env_float(
+        "FACE_MATCH_MARGIN", FACE_MATCH_DEFAULT_MARGIN, 0.0f, 0.50f);
+
     FaceTestRunner runner(&attendance_events);
     int run_ret = runner.run(
         image_dir ? image_dir : "/test_images",
-        [&db, &retina_ctx, &facenet_ctx](const cv::Mat& image,
-                                         const std::string& image_path,
-                                         FaceResult* result) -> bool {
+        [&db, &retina_ctx, &facenet_ctx, face_dist_threshold,
+         face_match_margin](const cv::Mat& image,
+                            const std::string& image_path,
+                            FaceResult* result) -> bool {
             if (!result)
                 return false;
 
@@ -1295,10 +1459,17 @@ static int do_test(const char *retina_model_path,
             }
 
             float dist = 9999.0f;
-            int idx = face_db_find(&db, embedding, &dist);
-            if (idx < 0 || dist >= FACE_DIST_THRESHOLD) {
-                printf("[test] %s -> UNKNOWN dist=%.3f\n",
-                       image_path.c_str(), dist);
+            float second_dist = 9999.0f;
+            int idx = face_db_find_best_two(
+                &db, embedding, &dist, &second_dist);
+            const bool ambiguous =
+                second_dist < 9998.0f &&
+                second_dist - dist < face_match_margin;
+            if (idx < 0 || dist >= face_dist_threshold || ambiguous) {
+                printf("[test] %s -> UNKNOWN best=%.3f second=%.3f%s\n",
+                       image_path.c_str(), (double)dist,
+                       (double)second_dist,
+                       ambiguous ? " ambiguous" : "");
                 return false;
             }
 
@@ -1309,7 +1480,8 @@ static int do_test(const char *retina_model_path,
             result->person_id = id_buf;
             result->name = db.entries[idx].name;
             result->distance = dist;
-            result->confidence = confidence_from_face_distance(dist);
+            result->confidence = confidence_from_face_distance(
+                dist, face_dist_threshold);
             return true;
         });
 
