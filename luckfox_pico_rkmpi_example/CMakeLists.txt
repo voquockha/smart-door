@@ -203,3 +203,14 @@ install(TARGETS ${PROJECT_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
 SET(MODEL_DIR "${EXAMPLE_DIR}/model")
 file(GLOB MODEL_FILES "${MODEL_DIR}/*")  
 install(FILES ${MODEL_FILES} DESTINATION ${CMAKE_INSTALL_PREFIX}/model)
+
+SET(SCRIPT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_DIR}/scripts")
+if(EXISTS "${SCRIPT_DIR}/x68-face-app" AND
+   EXISTS "${SCRIPT_DIR}/S99zzx68face" AND
+   EXISTS "${SCRIPT_DIR}/S99usb0config-stable")
+    install(PROGRAMS
+            "${SCRIPT_DIR}/x68-face-app"
+            "${SCRIPT_DIR}/S99zzx68face"
+            "${SCRIPT_DIR}/S99usb0config-stable"
+            DESTINATION ${CMAKE_INSTALL_PREFIX}/scripts)
+endif()

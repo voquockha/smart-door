@@ -50,8 +50,54 @@ export FACE_MATCH_MARGIN=0.10
 export FACE_MIN_SIZE_PIXELS=100
 export FACE_CONFIRM_FRAMES=3
 export FACE_ENROLL_MIN_SIZE_PIXELS=120
+
+# Chọn một trong hai chế độ: single hoặc multi.
+export FACE_ATTENDANCE_MODE=single
+export FACE_MULTI_MAX_PEOPLE=5
+export FACE_SINGLE_MIN_SIZE_PIXELS=180
+export FACE_SINGLE_CENTER_TOLERANCE=0.20
 export ANTI_SPOOF_THRESHOLD=0.85
 ```
+
+## Chế độ điểm danh một người hoặc nhiều người
+
+Điểm danh từng người, yêu cầu nhân viên đứng gần, chính diện và giữa camera:
+
+```sh
+export FACE_ATTENDANCE_MODE=single
+export FACE_SINGLE_MIN_SIZE_PIXELS=180
+export FACE_SINGLE_CENTER_TOLERANCE=0.20
+```
+
+Trong chế độ `single`:
+
+- Frame phải có đúng một khuôn mặt. Nếu phát hiện từ hai khuôn mặt trở lên,
+  thiết bị hiển thị `ONE PERSON ONLY` và không gửi sự kiện.
+- Khuôn mặt phải rộng và cao ít nhất
+  `FACE_SINGLE_MIN_SIZE_PIXELS`. Mặc định 180 pixel trên frame 720x480.
+- Tâm khuôn mặt phải nằm gần tâm camera. `0.20` nghĩa là cho phép lệch tối đa
+  20% chiều rộng/chiều cao frame tính từ tâm.
+- Luồng RTSP hiển thị một khung trái xoan căn mặt ở giữa hình. Màu và nội dung
+  trên khung thay đổi theo trạng thái `MOVE CLOSER`, `MOVE TO CENTER`,
+  `ONE PERSON ONLY`, `VERIFYING` và `ATTENDANCE OK`.
+- Trong `single`, bounding box khuôn mặt không vẽ thêm dòng trạng thái riêng,
+  tránh trùng nội dung với trạng thái phía trên khung trái xoan.
+- Các kiểm tra chính diện, anti-spoof, khoảng cách embedding và xác nhận nhiều
+  frame vẫn bắt buộc.
+
+Điểm danh nhóm tối đa năm người trong cùng một khung hình:
+
+```sh
+export FACE_ATTENDANCE_MODE=multi
+export FACE_MULTI_MAX_PEOPLE=5
+export FACE_MIN_SIZE_PIXELS=100
+```
+
+Trong chế độ `multi`, firmware chọn tối đa năm khuôn mặt có bounding box lớn
+nhất. Mỗi danh tính được xác nhận độc lập qua `FACE_CONFIRM_FRAMES` và tạo một
+sự kiện MQTT `face_recognized` riêng. Nếu camera thấy nhiều hơn giới hạn, các
+khuôn mặt còn lại hiển thị `MAX 5 - WAIT` và được bỏ qua ở frame đó. Chế độ
+`multi` không vẽ khung căn mặt cố định.
 
 Các lớp bảo vệ nhận diện mặc định:
 
@@ -124,6 +170,41 @@ vì cùng lý do thiếu CA store (`MQTT_FILE_TLS_VERIFY=0`). Biến cũ
 tới `ATTENDANCE_SERVER_HOST`, không tạo/ghi `attendance_queue.jsonl`, và không
 retry queue cũ. MQTT recognition event vẫn được gửi qua Cloud khi nhận diện
 thành công.
+
+## Tự khởi động và reconnect sau khi mất điện
+
+Không gọi `RkLunch-stop.sh` từ ứng dụng nhận diện. Script vendor này không chỉ
+dừng `rkipc` mà còn kill `udhcpc`; DHCP deconfig có thể xóa IP, default route và
+DNS của `eth0`, làm MQTT báo `cannot resolve broker`. Firmware hiện chỉ dừng
+`rkipc` để giải phóng camera và giữ nguyên network.
+
+Production dùng persistent session (`clean_session=false`). Sau một thời gian
+offline, broker có thể gửi PUBLISH QoS 1 đã xếp hàng trước SUBACK. Firmware xử
+lý và ACK các PUBLISH xen kẽ trong lúc chờ SUBACK, thay vì hiểu nhầm thành
+`SUBACK failed` rồi reconnect vô hạn. Nếu broker thực sự từ chối ACL, log sẽ ghi
+`SUBACK denied ... return_code=0x80`.
+
+Hai script trong thư mục `scripts` được cài trên thiết bị như sau:
+
+```sh
+cp scripts/x68-face-app /usr/local/bin/x68-face-app
+cp scripts/S99zzx68face /etc/init.d/S99zzx68face
+chmod 755 /usr/local/bin/x68-face-app /etc/init.d/S99zzx68face
+/etc/init.d/S99zzx68face start
+```
+
+Service đợi default route tối đa 30 giây, nạp `x68_luckfox_env.sh`, dùng PID
+file để ngăn chạy trùng và hỗ trợ `start`, `stop`, `restart`.
+
+LuckFox image gốc có `S99usb0config` đọc lại dòng `USB_STATE=DISCONNECTED` cuối
+cùng rồi restart toàn bộ USB gadget mỗi 5 giây. Một lần nhiễu USB vì vậy có thể
+bị khuếch đại thành chuỗi mất RNDIS/ADB. Dùng
+`scripts/S99usb0config-stable` thay thế: script này chỉ khôi phục IP
+`172.32.0.93` khi `usb0` xuất hiện và không restart gadget.
+
+Ứng dụng bắt `SIGINT`/`SIGTERM`, thoát frame loop rồi giải phóng camera, encoder
+và RKNN theo thứ tự. Service chờ tối đa 20 giây; nếu driver media bị kẹt thì mới
+dùng `SIGKILL`. Việc dừng ứng dụng không được làm thay đổi USB gadget.
 
 ## Topic
 

@@ -1,0 +1,51 @@
+#!/bin/sh
+
+APP_WRAPPER=/usr/local/bin/x68-face-app
+PID_FILE=/var/run/x68-face-app.pid
+
+case "$1" in
+    start)
+        printf "Starting x68 face application: "
+        if [ -f "$PID_FILE" ] &&
+           kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+            echo "already running"
+            exit 0
+        fi
+        rm -f "$PID_FILE"
+        if start-stop-daemon -S -q -b -m -p "$PID_FILE" \
+                -x "$APP_WRAPPER"; then
+            echo "OK"
+        else
+            echo "already running or failed"
+        fi
+        ;;
+    stop)
+        printf "Stopping x68 face application: "
+        app_pid=$(cat "$PID_FILE" 2>/dev/null)
+        start-stop-daemon -K -q -o -p "$PID_FILE" -s TERM
+        wait_count=0
+        while [ -n "$app_pid" ] &&
+              kill -0 "$app_pid" 2>/dev/null &&
+              [ "$wait_count" -lt 20 ]; do
+            sleep 1
+            wait_count=$((wait_count + 1))
+        done
+        if [ -n "$app_pid" ] && kill -0 "$app_pid" 2>/dev/null; then
+            echo
+            echo "Graceful stop timed out; forcing PID $app_pid"
+            kill -KILL "$app_pid" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+        echo "OK"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

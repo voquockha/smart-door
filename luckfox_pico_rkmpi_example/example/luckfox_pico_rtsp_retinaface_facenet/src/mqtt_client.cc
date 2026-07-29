@@ -509,16 +509,65 @@ bool MqttClient::subscribeTopic(const std::string& topic)
     if (!sendPacket(makeSubscribePacket(topic, packet_id)))
         return false;
 
-    unsigned char packet_type = 0;
-    std::string body;
-    if (!readPacket(&packet_type, &body) || packet_type != 0x90 ||
-        body.size() < 3 || readUint16(body, 0) != packet_id ||
-        (unsigned char)body[2] == 0x80) {
-        printf("[mqtt] SUBACK failed topic=%s\n", topic.c_str());
-        return false;
+    // A production connection keeps its broker session. After the device has
+    // been offline, the broker is allowed to deliver queued PUBLISH packets
+    // immediately after CONNACK, before replying to this SUBSCRIBE. Do not
+    // mistake such a packet for a failed SUBACK or reconnect forever without
+    // acknowledging the queued command.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (running_ && std::chrono::steady_clock::now() < deadline) {
+        unsigned char packet_type = 0;
+        std::string body;
+        if (!readPacket(&packet_type, &body))
+            continue;
+
+        const unsigned char type = packet_type & 0xf0;
+        if (type == 0x30) {
+            printf("[mqtt] queued PUBLISH received while waiting for "
+                   "SUBACK topic=%s\n", topic.c_str());
+            handlePublish(packet_type, body);
+            continue;
+        }
+        if (type != 0x90) {
+            printf("[mqtt] ignoring packet type=0x%02x while waiting for "
+                   "SUBACK topic=%s\n", type, topic.c_str());
+            continue;
+        }
+        if (body.size() < 3) {
+            printf("[mqtt] malformed SUBACK topic=%s bytes=%zu\n",
+                   topic.c_str(), body.size());
+            return false;
+        }
+
+        const unsigned short acknowledged_id = readUint16(body, 0);
+        if (acknowledged_id != packet_id) {
+            printf("[mqtt] ignoring SUBACK packet_id=%u while waiting for "
+                   "packet_id=%u topic=%s\n",
+                   acknowledged_id, packet_id, topic.c_str());
+            continue;
+        }
+
+        const unsigned char return_code = (unsigned char)body[2];
+        if (return_code == 0x80) {
+            printf("[mqtt] SUBACK denied topic=%s return_code=0x80\n",
+                   topic.c_str());
+            return false;
+        }
+        if (return_code > 0x02) {
+            printf("[mqtt] invalid SUBACK topic=%s return_code=0x%02x\n",
+                   topic.c_str(), return_code);
+            return false;
+        }
+
+        printf("[mqtt] subscribed topic=%s qos=%u\n",
+               topic.c_str(), return_code);
+        return true;
     }
-    printf("[mqtt] subscribed topic=%s qos=1\n", topic.c_str());
-    return true;
+
+    printf("[mqtt] SUBACK timeout topic=%s packet_id=%u\n",
+           topic.c_str(), packet_id);
+    return false;
 }
 
 bool MqttClient::subscribeActiveTopics()

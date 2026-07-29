@@ -48,6 +48,14 @@ export FACE_MATCH_MARGIN=0.10
 export FACE_MIN_SIZE_PIXELS=100
 export FACE_CONFIRM_FRAMES=3
 export FACE_ENROLL_MIN_SIZE_PIXELS=120
+
+# Attendance scene mode:
+#   single: exactly one employee, close to and centered in front of the camera.
+#   multi:  recognize up to FACE_MULTI_MAX_PEOPLE employees in one frame.
+export FACE_ATTENDANCE_MODE=single
+export FACE_MULTI_MAX_PEOPLE=5
+export FACE_SINGLE_MIN_SIZE_PIXELS=180
+export FACE_SINGLE_CENTER_TOLERANCE=0.20
 export ANTI_SPOOF_THRESHOLD=0.85
 
 # Optional Telegram. Leave unset for MQTT-only runtime.

@@ -1,0 +1,78 @@
+#!/bin/sh
+
+TARGET_IP=172.32.0.93
+USB_MODE_PATH=/proc/device-tree/usbdrd/usb@ffb00000/dr_mode
+PID_FILE=/var/run/usb0-ip-watch.pid
+
+usb0_current_ip()
+{
+    ifconfig usb0 2>/dev/null |
+        sed -n 's/.*inet addr:\([^ ]*\).*/\1/p' |
+        head -n 1
+}
+
+usb0_config()
+{
+    retries=0
+    while [ "$retries" -lt 10 ]; do
+        if [ -d /sys/class/net/usb0 ]; then
+            current_ip=$(usb0_current_ip)
+            if [ "$current_ip" = "$TARGET_IP" ]; then
+                return 0
+            fi
+            ifconfig usb0 up >/dev/null 2>&1
+            ifconfig usb0 "$TARGET_IP" netmask 255.255.0.0 \
+                >/dev/null 2>&1
+        fi
+        retries=$((retries + 1))
+        sleep 1
+    done
+    return 1
+}
+
+watch_usb0_ip()
+{
+    while true; do
+        if [ -d /sys/class/net/usb0 ] &&
+           [ "$(usb0_current_ip)" != "$TARGET_IP" ]; then
+            usb0_config
+        fi
+        sleep 5
+    done
+}
+
+case "$1" in
+    start)
+        if [ "$(cat "$USB_MODE_PATH" 2>/dev/null)" != "peripheral" ]; then
+            echo "usb0 is using host mode"
+            exit 0
+        fi
+        if [ -f "$PID_FILE" ] &&
+           kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+            exit 0
+        fi
+        rm -f "$PID_FILE"
+        usb0_config
+        nohup "$0" watch >/tmp/usb0-ip-watch.log 2>&1 </dev/null &
+        echo $! >"$PID_FILE"
+        ;;
+    stop)
+        if [ -f "$PID_FILE" ]; then
+            kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+            rm -f "$PID_FILE"
+        fi
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    watch)
+        watch_usb0_ip
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

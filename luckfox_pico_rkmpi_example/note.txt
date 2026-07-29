@@ -37,3 +37,4 @@ mosquitto_pub -h 127.0.0.1 -t x86-lite/local/device/mac/request -m '{
     "company_id": "vnpt"
   }
 }'
+mv /etc/init.d/x68-face-autostart.disabled /etc/init.d/S99zzx68face

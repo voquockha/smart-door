@@ -68,8 +68,28 @@
 #define FACE_MATCH_DEFAULT_MARGIN 0.10f
 #define FACE_MIN_DEFAULT_SIZE_PIXELS 100
 #define FACE_CONFIRM_DEFAULT_FRAMES 3
+#define FACE_MULTI_DEFAULT_MAX_PEOPLE 5
+#define FACE_SINGLE_DEFAULT_MIN_SIZE_PIXELS 180
+#define FACE_SINGLE_DEFAULT_CENTER_TOLERANCE 0.20f
 #define ANTI_SPOOF_DEFAULT_MODEL "model/minifasnet_v2_80x80.rknn"
 #define ANTI_SPOOF_REAL_THRESHOLD 0.80f
+
+static volatile sig_atomic_t g_stop_requested = 0;
+
+static void request_stop(int)
+{
+    g_stop_requested = 1;
+}
+
+static void install_stop_signal_handlers()
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = request_stop;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+}
 
 // -------------------------------------------------------------------------
 // Timing helper
@@ -127,6 +147,11 @@ static int env_int(const char* name, int fallback,
 struct FaceConfirmationState {
     unsigned long long last_frame = 0;
     int consecutive_frames = 0;
+};
+
+enum class FaceAttendanceMode {
+    Single,
+    Multi
 };
 
 static void onAttendanceSuccess(const TelegramClient& telegram,
@@ -607,6 +632,8 @@ static int do_run(const char *retina_model_path,
                   const char *anti_spoof_model_path)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    g_stop_requested = 0;
+    install_stop_signal_handlers();
 
     // -----------------------------------------------------------------------
     // Load face database
@@ -625,7 +652,18 @@ static int do_run(const char *retina_model_path,
     std::mutex db_mutex;
     std::mutex model_mutex;
 
-    system("RkLunch-stop.sh");
+    // The vendor RkLunch-stop.sh also kills udhcpc. On this device the DHCP
+    // deconfig hook then removes eth0's address, default route, and DNS,
+    // leaving MQTT offline as soon as the camera application starts. We only
+    // need to release the vendor camera owner, so stop rkipc without touching
+    // networking.
+    printf("[run] stopping vendor camera service without changing network\n");
+    system("killall rkipc >/dev/null 2>&1");
+    for (int wait_count = 0; wait_count < 20; ++wait_count) {
+        if (system("pidof rkipc >/dev/null 2>&1") != 0)
+            break;
+        usleep(100000);
+    }
 
     const int width        = DISP_WIDTH;
     const int height       = DISP_HEIGHT;
@@ -645,11 +683,35 @@ static int do_run(const char *retina_model_path,
         "FACE_MIN_SIZE_PIXELS", FACE_MIN_DEFAULT_SIZE_PIXELS, 40, 400);
     const int face_confirm_frames = env_int(
         "FACE_CONFIRM_FRAMES", FACE_CONFIRM_DEFAULT_FRAMES, 1, 30);
+    const char* configured_face_mode = getenv("FACE_ATTENDANCE_MODE");
+    FaceAttendanceMode face_attendance_mode = FaceAttendanceMode::Single;
+    if (configured_face_mode && *configured_face_mode) {
+        if (strcmp(configured_face_mode, "multi") == 0) {
+            face_attendance_mode = FaceAttendanceMode::Multi;
+        } else if (strcmp(configured_face_mode, "single") != 0) {
+            printf("[config] invalid FACE_ATTENDANCE_MODE=%s, use single\n",
+                   configured_face_mode);
+        }
+    }
+    const int face_multi_max_people = env_int(
+        "FACE_MULTI_MAX_PEOPLE", FACE_MULTI_DEFAULT_MAX_PEOPLE, 1, 5);
+    const int face_single_min_size = env_int(
+        "FACE_SINGLE_MIN_SIZE_PIXELS",
+        FACE_SINGLE_DEFAULT_MIN_SIZE_PIXELS, 80, 400);
+    const float face_single_center_tolerance = env_float(
+        "FACE_SINGLE_CENTER_TOLERANCE",
+        FACE_SINGLE_DEFAULT_CENTER_TOLERANCE, 0.05f, 0.45f);
 
     printf("[run] USE_FACE_ALIGNMENT=%d face threshold=%.2f margin=%.2f "
            "min_size=%dpx confirm=%d frames\n",
            USE_FACE_ALIGNMENT, (double)face_dist_threshold,
            (double)face_match_margin, face_min_size, face_confirm_frames);
+    printf("[run] attendance face mode=%s multi_max=%d "
+           "single_min_size=%dpx single_center_tolerance=%.2f\n",
+           face_attendance_mode == FaceAttendanceMode::Single
+               ? "single" : "multi",
+           face_multi_max_people, face_single_min_size,
+           (double)face_single_center_tolerance);
 
     // -----------------------------------------------------------------------
     // Init RKNN models
@@ -694,6 +756,7 @@ static int do_run(const char *retina_model_path,
     bool  face_identity_confirmed[128];
     bool  face_is_spoof[128];
     bool  face_needs_position[128];
+    bool  face_selected[128];
     float face_liveness_scores[128];
     std::string face_instructions[128];
     std::map<std::string, FaceConfirmationState> confirmation_states;
@@ -929,7 +992,13 @@ static int do_run(const char *retina_model_path,
     // -----------------------------------------------------------------------
     struct timespec t_frame_start, t_retina_done, t_align_done, t_facenet_done;
 
-    while (1) {
+    // Some vendor media libraries install process-wide signal handlers while
+    // initializing. Re-assert the application handler after all camera/NPU
+    // setup so SIGTERM from the init service exits the frame loop and reaches
+    // the ordered cleanup below.
+    install_stop_signal_handlers();
+
+    while (!g_stop_requested) {
         clock_gettime(CLOCK_MONOTONIC, &t_frame_start);
 
         h264_frame.stVFrame.u32TimeRef = H264_TimeRef++;
@@ -949,6 +1018,7 @@ static int do_run(const char *retina_model_path,
             long align_us   = 0;
             long facenet_us = 0;
             long anti_spoof_us = 0;
+            int detected_face_count = 0;
 
             {
                 std::lock_guard<std::mutex> model_lock(model_mutex);
@@ -968,18 +1038,75 @@ static int do_run(const char *retina_model_path,
 
             bgr.copyTo(frame);   // clean frame for drawing
 
+            detected_face_count =
+                std::max(0, std::min(od_results.count, 128));
+            memset(face_selected, 0, sizeof(face_selected));
+
+            if (face_attendance_mode == FaceAttendanceMode::Single) {
+                if (detected_face_count == 1) {
+                    face_selected[0] = true;
+                } else if (detected_face_count > 1 &&
+                           recognition_frame % 30 == 1) {
+                    printf("[attendance-mode] single requires exactly one "
+                           "face; detected=%d\n", detected_face_count);
+                }
+            } else {
+                std::vector<int> face_order;
+                face_order.reserve(detected_face_count);
+                for (int i = 0; i < detected_face_count; ++i)
+                    face_order.push_back(i);
+                std::sort(face_order.begin(), face_order.end(),
+                          [&od_results](int lhs, int rhs) {
+                    const object_detect_result& a =
+                        od_results.results[lhs];
+                    const object_detect_result& b =
+                        od_results.results[rhs];
+                    const long area_a =
+                        (long)std::max(0, a.box.right - a.box.left) *
+                        (long)std::max(0, a.box.bottom - a.box.top);
+                    const long area_b =
+                        (long)std::max(0, b.box.right - b.box.left) *
+                        (long)std::max(0, b.box.bottom - b.box.top);
+                    return area_a > area_b;
+                });
+                const int selected_count = std::min(
+                    (int)face_order.size(), face_multi_max_people);
+                for (int i = 0; i < selected_count; ++i)
+                    face_selected[face_order[i]] = true;
+            }
+
             // -----------------------------------------------------------
             // Phase 1: per-face embedding + DB lookup
             // -----------------------------------------------------------
-            for (int i = 0; i < od_results.count; i++) {
+            for (int i = 0; i < detected_face_count; i++) {
                 object_detect_result *det = &(od_results.results[i]);
 
+                face_dists[i] = 9999.0f;
+                face_confidences[i] = 0.0f;
+                face_ids[i][0] = '\0';
+                strncpy(face_names[i], "UNKNOWN", FACE_DB_NAME_LEN - 1);
+                face_names[i][FACE_DB_NAME_LEN - 1] = '\0';
                 face_liveness_verified[i] = false;
                 face_identity_confirmed[i] = false;
                 face_is_spoof[i] = false;
                 face_needs_position[i] = false;
                 face_liveness_scores[i] = 0.0f;
                 face_instructions[i].clear();
+
+                if (!face_selected[i]) {
+                    face_needs_position[i] = true;
+                    if (face_attendance_mode ==
+                        FaceAttendanceMode::Single) {
+                        face_instructions[i] = "ONE PERSON ONLY";
+                    } else {
+                        char instruction[32];
+                        snprintf(instruction, sizeof(instruction),
+                                 "MAX %d - WAIT",
+                                 face_multi_max_people);
+                        face_instructions[i] = instruction;
+                    }
+                    continue;
+                }
 
                 int sX = (int)((float)det->box.left   * scale_x);
                 int sY = (int)((float)det->box.top    * scale_y);
@@ -1027,8 +1154,11 @@ static int do_run(const char *retina_model_path,
 
                 const float face_width = (float)std::max(1, eX - sX);
                 const float face_height = (float)std::max(1, eY - sY);
-                if (face_width < face_min_size ||
-                    face_height < face_min_size) {
+                const int required_face_size =
+                    face_attendance_mode == FaceAttendanceMode::Single
+                        ? face_single_min_size : face_min_size;
+                if (face_width < required_face_size ||
+                    face_height < required_face_size) {
                     face_dists[i] = 9999.0f;
                     face_confidences[i] = 0.0f;
                     face_ids[i][0] = '\0';
@@ -1040,8 +1170,29 @@ static int do_run(const char *retina_model_path,
                     printf("[face-quality %d] face too small %.0fx%.0f "
                            "(minimum %dx%d); recognition skipped\n",
                            i, (double)face_width, (double)face_height,
-                           face_min_size, face_min_size);
+                           required_face_size, required_face_size);
                     continue;
+                }
+
+                if (face_attendance_mode == FaceAttendanceMode::Single) {
+                    const float face_center_x = (sX + eX) * 0.5f;
+                    const float face_center_y = (sY + eY) * 0.5f;
+                    const bool face_not_centered =
+                        std::abs(face_center_x - width * 0.5f) >
+                            width * face_single_center_tolerance ||
+                        std::abs(face_center_y - height * 0.5f) >
+                            height * face_single_center_tolerance;
+                    if (face_not_centered) {
+                        face_needs_position[i] = true;
+                        face_instructions[i] = "MOVE TO CENTER";
+                        printf("[face-quality %d] single mode face center "
+                               "(%.0f,%.0f) outside tolerance %.2f; "
+                               "recognition skipped\n",
+                               i, (double)face_center_x,
+                               (double)face_center_y,
+                               (double)face_single_center_tolerance);
+                        continue;
+                    }
                 }
                 const float eye_span = std::abs(lm_x[1] - lm_x[0]);
                 const float mouth_span = std::abs(lm_x[4] - lm_x[3]);
@@ -1245,7 +1396,7 @@ static int do_run(const char *retina_model_path,
             // -----------------------------------------------------------
             // Phase 2: draw bounding boxes and labels
             // -----------------------------------------------------------
-            for (int i = 0; i < od_results.count; i++) {
+            for (int i = 0; i < detected_face_count; i++) {
                 object_detect_result *det = &(od_results.results[i]);
 
                 int sX = (int)((float)det->box.left   * scale_x);
@@ -1307,9 +1458,76 @@ static int do_run(const char *retina_model_path,
                        (double)face_liveness_scores[i],
                        face_instructions[i].c_str());
 
-                cv::putText(frame, label,
-                            cv::Point(sX, std::max(0, sY - 8)),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
+                // Single mode already presents one canonical status above the
+                // fixed oval guide. Avoid duplicating status over the detected
+                // face box. Multi mode still needs one label per person.
+                if (face_attendance_mode == FaceAttendanceMode::Multi) {
+                    cv::putText(frame, label,
+                                cv::Point(sX, std::max(0, sY - 8)),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
+                }
+            }
+
+            // Single-person mode includes a fixed visual guide so employees
+            // can place a sufficiently large, centered face before matching.
+            // Multi-person mode deliberately has no guide overlay.
+            if (face_attendance_mode == FaceAttendanceMode::Single) {
+                const int guide_width = std::min(
+                    width - 40, std::max(260, face_single_min_size + 100));
+                const int guide_height = std::min(
+                    height - 40, std::max(300, face_single_min_size + 140));
+                const int guide_left = (width - guide_width) / 2;
+                const int guide_top = (height - guide_height) / 2;
+                const cv::Point guide_center(width / 2, height / 2);
+                const cv::Size guide_axes(
+                    guide_width / 2, guide_height / 2);
+
+                cv::Scalar guide_color(0, 215, 255);
+                std::string guide_text = "PLACE FACE INSIDE FRAME";
+                if (detected_face_count > 1) {
+                    guide_color = cv::Scalar(0, 0, 255);
+                    guide_text = "ONE PERSON ONLY";
+                } else if (detected_face_count == 1) {
+                    const bool matched =
+                        strcmp(face_names[0], "UNKNOWN") != 0 &&
+                        !face_is_spoof[0];
+                    const bool attendance_ok =
+                        matched && face_liveness_verified[0] &&
+                        face_identity_confirmed[0];
+                    if (face_is_spoof[0]) {
+                        guide_color = cv::Scalar(255, 0, 255);
+                        guide_text = "SPOOF BLOCKED";
+                    } else if (face_needs_position[0]) {
+                        guide_text = face_instructions[0].empty()
+                            ? "ALIGN FACE TO FRAME"
+                            : face_instructions[0];
+                    } else if (attendance_ok) {
+                        guide_color = cv::Scalar(0, 255, 0);
+                        guide_text = "ATTENDANCE OK";
+                    } else if (!face_instructions[0].empty()) {
+                        guide_color = cv::Scalar(0, 255, 255);
+                        guide_text = face_instructions[0];
+                    } else {
+                        guide_color = cv::Scalar(0, 255, 255);
+                        guide_text = "HOLD STILL";
+                    }
+                }
+
+                // Black outline keeps the oval visible against bright walls,
+                // while the inner stroke carries the current guide state.
+                cv::ellipse(frame, guide_center, guide_axes, 0.0,
+                            0.0, 360.0, cv::Scalar(0, 0, 0), 7);
+                cv::ellipse(frame, guide_center, guide_axes, 0.0,
+                            0.0, 360.0, guide_color, 4);
+
+                const cv::Point guide_text_origin(
+                    guide_left, std::max(24, guide_top - 12));
+                cv::putText(frame, guide_text, guide_text_origin,
+                            cv::FONT_HERSHEY_SIMPLEX, 0.65,
+                            cv::Scalar(0, 0, 0), 5);
+                cv::putText(frame, guide_text, guide_text_origin,
+                            cv::FONT_HERSHEY_SIMPLEX, 0.65,
+                            guide_color, 2);
             }
 
             memcpy(enc_data, frame.data, width * height * 3);
@@ -1368,6 +1586,7 @@ static int do_run(const char *retina_model_path,
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
+    printf("[run] stop requested; releasing camera and inference resources\n");
     free(face_fp32);
     free(stFrame.pstPack);
 
