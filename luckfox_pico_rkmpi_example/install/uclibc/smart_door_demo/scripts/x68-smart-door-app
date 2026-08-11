@@ -1,0 +1,32 @@
+#!/bin/sh
+
+APP_DIR=/root/smart_door
+APP_BIN="$APP_DIR/smart_door"
+ENV_FILE="$APP_DIR/x68_luckfox_env.sh"
+LOG_FILE="$APP_DIR/smart-locker.log"
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/oem:/oem/bin:/oem/usr/bin:/oem/sbin:/oem/usr/sbin
+export LD_LIBRARY_PATH="$APP_DIR/lib:/oem/usr/lib:/oem/lib:/usr/lib"
+export SMART_LOCKER_STATE_FILE="$APP_DIR/locker_state.db"
+
+cd "$APP_DIR" || exit 1
+
+# Give boot-time networking a short head start. MQTT performs its own retry,
+# so a slow DHCP/DNS response does not prevent the application from starting.
+wait_count=0
+while ! ip route | grep -q '^default ' && [ "$wait_count" -lt 30 ]; do
+    sleep 1
+    wait_count=$((wait_count + 1))
+done
+
+if [ -f "$ENV_FILE" ]; then
+    . "$ENV_FILE"
+elif [ -f "$APP_DIR/env" ]; then
+    . "$APP_DIR/env"
+fi
+
+exec "$APP_BIN" run \
+    model/retinaface.rknn \
+    model/facenet.rknn \
+    face_db.bin \
+    model/minifasnet_v2_80x80.rknn >>"$LOG_FILE" 2>&1

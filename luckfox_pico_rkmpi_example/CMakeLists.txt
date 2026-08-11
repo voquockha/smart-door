@@ -60,6 +60,22 @@ find_package(OpenCV REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+set(IS_SMART_DOOR OFF)
+if("${EXAMPLE_NAME}" STREQUAL "smart_door")
+    set(IS_SMART_DOOR ON)
+    set(FACENET_EXAMPLE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/example/luckfox_pico_rtsp_retinaface_facenet")
+
+    # LVGL is private to the Smart Locker release target.
+    set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lv_conf.h"
+        CACHE STRING "LVGL configuration" FORCE)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lvgl
+                     ${CMAKE_CURRENT_BINARY_DIR}/lvgl EXCLUDE_FROM_ALL)
+    target_include_directories(lvgl PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+        ${EXAMPLE_DIR}/include)
+endif()
+
 set(LUCKFOX_BUILDROOT_SYSROOT
     "${SDK_PATH}/sysdrv/source/buildroot/buildroot-2023.02.6/output/host/arm-buildroot-linux-uclibcgnueabihf/sysroot")
 find_path(CURL_INCLUDE_DIR
@@ -117,6 +133,16 @@ message(STATUS "Found libjpeg library: ${JPEG_LIBRARY}")
 
 set(SRC_DIR "${EXAMPLE_DIR}/src")
 file(GLOB SRC_FILES "${SRC_DIR}/*.cc")
+if(IS_SMART_DOOR)
+    file(GLOB FACENET_SHARED_SRC "${FACENET_EXAMPLE_DIR}/src/*.cc")
+    list(REMOVE_ITEM FACENET_SHARED_SRC
+         "${FACENET_EXAMPLE_DIR}/src/main.cc")
+    list(APPEND SRC_FILES
+        ${FACENET_SHARED_SRC}
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lv_drivers/display/fbdev.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lv_drivers/indev/evdev.c")
+    set(SMART_DOOR_LIBS lvgl)
+endif()
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 set_target_properties(${PROJECT_NAME} PROPERTIES
     BUILD_RPATH "$ORIGIN/lib"
@@ -150,6 +176,7 @@ if(${LIBC_TYPE} STREQUAL "uclibc")
                         ${CURL_EXTRA_LIBS}
                         ${JPEG_LIBRARY}
                         rga
+                        ${SMART_DOOR_LIBS}
                         )
 elseif(${LIBC_TYPE} STREQUAL "glibc")
     target_link_libraries(${PROJECT_NAME}
@@ -172,6 +199,7 @@ elseif(${LIBC_TYPE} STREQUAL "glibc")
                         ${CURL_EXTRA_LIBS}
                         ${JPEG_LIBRARY}
                         rga
+                        ${SMART_DOOR_LIBS}
                         )
 endif()
 
@@ -195,12 +223,19 @@ target_include_directories(${PROJECT_NAME} PRIVATE
                             ${CMAKE_CURRENT_SOURCE_DIR}/include/rkaiq/iq_parser
                             ${CMAKE_CURRENT_SOURCE_DIR}/include/rkaiq/iq_parser_v2
                             ${CMAKE_CURRENT_SOURCE_DIR}/include/rkaiq/smartIr
+                            ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+                            ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lvgl
+                            ${FACENET_EXAMPLE_DIR}/include
                           )
-message(STATUS "model dir PATH: ${EXAMPLE_DIR}/model")
+if(IS_SMART_DOOR)
+    set(MODEL_DIR "${FACENET_EXAMPLE_DIR}/model")
+else()
+    set(MODEL_DIR "${EXAMPLE_DIR}/model")
+endif()
+message(STATUS "model dir PATH: ${MODEL_DIR}")
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install/${LIBC_TYPE}/${PROJECT_NAME}_demo")
 install(TARGETS ${PROJECT_NAME} DESTINATION ${CMAKE_INSTALL_PREFIX})
-SET(MODEL_DIR "${EXAMPLE_DIR}/model")
 file(GLOB MODEL_FILES "${MODEL_DIR}/*")  
 install(FILES ${MODEL_FILES} DESTINATION ${CMAKE_INSTALL_PREFIX}/model)
 
@@ -212,5 +247,14 @@ if(EXISTS "${SCRIPT_DIR}/x68-face-app" AND
             "${SCRIPT_DIR}/x68-face-app"
             "${SCRIPT_DIR}/S99zzx68face"
             "${SCRIPT_DIR}/S99usb0config-stable"
-            DESTINATION ${CMAKE_INSTALL_PREFIX}/scripts)
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/scripts)
+endif()
+if(IS_SMART_DOOR AND
+   EXISTS "${SCRIPT_DIR}/x68-smart-door-app" AND
+   EXISTS "${SCRIPT_DIR}/S99zzsmartdoor")
+    install(PROGRAMS
+        "${SCRIPT_DIR}/x68-smart-door-app"
+        "${SCRIPT_DIR}/S99zzsmartdoor"
+        "${SCRIPT_DIR}/S99usb0config-stable"
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/scripts)
 endif()

@@ -38,7 +38,8 @@ options=("luckfox_pico_rtsp_opencv"
 	"luckfox_pico_rtsp_retinaface_osd"
 	"luckfox_pico_rtsp_retinaface_facenet"
 	"luckfox_pico_rtsp_yolov5"
-	"rknn_model_test")
+	"rknn_model_test"
+	"smart_door")
 
 PS3="Enter your choice [1-${#options[@]}]: "
 
