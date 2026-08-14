@@ -1,0 +1,173 @@
+#ifndef FACE_EVENT_MANAGER_H
+#define FACE_EVENT_MANAGER_H
+
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <vector>
+#include <atomic>
+
+#include "opencv2/core/core.hpp"
+
+struct Frame {
+    cv::Mat image_bgr;
+
+    Frame() = default;
+    explicit Frame(const cv::Mat& image) : image_bgr(image) {}
+};
+
+struct FaceResult {
+    bool recognized = false;
+    std::string person_id;
+    std::string name;
+    std::string employee_id;
+    std::string audio_path;
+    float confidence = 0.0f;
+    float distance = -1.0f;
+
+    // Set only after the passive RKNN anti-spoof model accepts the face.
+    bool liveness_verified = false;
+    float liveness_score = 0.0f;
+};
+
+struct AttendanceFrameDecision {
+    bool attendance_recorded = false;
+    bool liveness_verified = false;
+    std::string instruction;
+};
+
+struct AttendanceJson {
+    std::string user_id;
+    std::string name;
+    std::string employee_id;
+    std::string audio_path;
+    std::string time;
+    float confidence = 0.0f;
+    float distance = -1.0f;
+    float liveness_score = 0.0f;
+    std::string camera_id;
+    std::string image_path;
+};
+
+using AttendanceData = AttendanceJson;
+
+class FaceEventManager {
+public:
+    using AttendanceSuccessCallback =
+        std::function<void(const std::string& name, const std::string& time)>;
+    using AttendanceDataCallback =
+        std::function<void(const AttendanceData& data,
+                           const std::string& image_path)>;
+
+    explicit FaceEventManager(bool require_liveness = true);
+    ~FaceEventManager();
+
+    FaceEventManager(const FaceEventManager&) = delete;
+    FaceEventManager& operator=(const FaceEventManager&) = delete;
+
+    AttendanceFrameDecision onFrame(Frame frame, FaceResult result);
+    void setAttendanceSuccessCallback(AttendanceSuccessCallback callback);
+    void setAttendanceDataCallback(AttendanceDataCallback callback);
+
+private:
+    template <typename T>
+    class ThreadSafeQueue {
+    public:
+        explicit ThreadSafeQueue(size_t capacity);
+
+        bool push(T item);
+        bool popFor(T* out, int timeout_ms);
+        void shutdown();
+
+    private:
+        const size_t capacity_;
+        bool stopped_;
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        std::queue<T> queue_;
+    };
+
+    struct WorkItem {
+        cv::Mat image_bgr;
+        AttendanceJson data;
+        std::string metadata_path;
+        std::string post_payload;
+    };
+
+    bool isValid(FaceResult r);
+    bool isCooldown(std::string person_id);
+    void markCooldown(std::string person_id);
+    bool handleEvent(Frame frame, FaceResult r);
+    static AttendanceFrameDecision makeDecision(bool recorded,
+                                                bool verified,
+                                                const char* instruction);
+
+    bool saveImage(Frame frame, std::string path);
+    bool saveMetadata(AttendanceJson data, std::string path);
+    bool sendToServer(AttendanceJson data);
+    void playAttendanceAudio(const AttendanceJson& data);
+
+    void workerLoop();
+    void processWorkItem(WorkItem item);
+    void retryQueuedEvents();
+    void enqueueFailedPost(const std::string& payload);
+
+    static std::string getEnvOrDefault(const char* name,
+                                       const std::string& fallback);
+    static bool getEnvBool(const char* name, bool fallback);
+    static std::string nowDate();
+    static std::string nowTime();
+    static std::string compactTime(const std::string& timestamp);
+    static std::string sanitizeFilename(const std::string& name);
+    static std::string joinPath(const std::string& left,
+                                const std::string& right);
+    static bool ensureDirectory(const std::string& path);
+    static std::string jsonEscape(const std::string& value);
+    static std::string metadataJson(const AttendanceJson& data);
+    static std::string postJson(const AttendanceJson& data);
+    static bool writeTextFile(const std::string& path,
+                              const std::string& content);
+    static bool writeJpegFile(const std::string& path,
+                              const cv::Mat& image_rgb,
+                              int quality);
+    static bool isDirectoryWritable(const std::string& path);
+    static bool httpPost(const std::string& host,
+                         int port,
+                         const std::string& path,
+                         const std::string& payload,
+                         int timeout_ms);
+
+    const float confidence_threshold_;
+    const int cooldown_seconds_;
+    const bool require_liveness_;
+    const std::string requested_base_dir_;
+    std::string effective_base_dir_;
+    const std::string camera_id_;
+    const bool http_enabled_;
+    const std::string server_host_;
+    const int server_port_;
+    const std::string server_path_;
+    const bool save_images_;
+    const bool audio_enabled_;
+    const std::string audio_player_path_;
+    std::string queue_dir_;
+    std::string queue_path_;
+
+    ThreadSafeQueue<WorkItem> work_queue_;
+    std::thread worker_;
+    std::atomic<bool> running_;
+
+    std::mutex cooldown_mutex_;
+    std::map<std::string, std::chrono::steady_clock::time_point> cooldown_;
+
+    std::mutex callback_mutex_;
+    AttendanceSuccessCallback attendance_success_callback_;
+    AttendanceDataCallback attendance_data_callback_;
+};
+
+#endif /* FACE_EVENT_MANAGER_H */

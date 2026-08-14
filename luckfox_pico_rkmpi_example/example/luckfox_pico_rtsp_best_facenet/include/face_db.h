@@ -1,0 +1,84 @@
+#ifndef FACE_DB_H
+#define FACE_DB_H
+
+#include <stddef.h>
+
+// Simple flat-file face database for door-access recognition.
+//
+// Layout on disk (binary, little-endian):
+//   4 bytes  : int32  count
+//   count × sizeof(face_entry_t) bytes : entries
+//
+// Thread-safety: not thread-safe; single-threaded use only.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define FACE_DB_MAX_ENTRIES 64
+#define FACE_DB_NAME_LEN    64
+#define FACE_DB_EMPLOYEE_ID_LEN 64
+#define FACE_DB_AUDIO_PATH_LEN  256
+#define FACE_DB_EMBED_DIM   128
+
+typedef struct {
+    char  name[FACE_DB_NAME_LEN];   /* null-terminated display name */
+    char  employee_id[FACE_DB_EMPLOYEE_ID_LEN];
+    char  audio_path[FACE_DB_AUDIO_PATH_LEN];
+    float embedding[FACE_DB_EMBED_DIM];
+} face_entry_t;
+
+typedef struct {
+    int          count;
+    face_entry_t entries[FACE_DB_MAX_ENTRIES];
+} face_db_t;
+
+/* Load database from file.
+ * Returns 0 on success; -1 if file not found (db is left empty, not an error
+ * for first-time use).  On corrupt data the loaded count is clamped. */
+int face_db_load(face_db_t *db, const char *path);
+
+/* Persist database to file.  Returns 0 on success, -1 on I/O error. */
+int face_db_save(const face_db_t *db, const char *path);
+
+/* Append a new entry.  Returns 0 on success, -1 if the database is full. */
+int face_db_add(face_db_t *db, const char *name, const float *embedding);
+
+/* Add an entry, or update the existing entry with the same employee_id. */
+int face_db_add_with_info(face_db_t *db,
+                          const char *name,
+                          const char *employee_id,
+                          const char *audio_path,
+                          const float *embedding);
+
+/* Remove an entry by employee_id (case-insensitive). The removed audio path
+ * is copied to out_audio_path when a buffer is provided.
+ * Returns 0 on success, -1 when employee_id is not found. */
+int face_db_remove_by_employee_id(face_db_t *db,
+                                  const char *employee_id,
+                                  char *out_audio_path,
+                                  size_t out_audio_path_len);
+
+/* Find the closest registered face.
+ * Sets *out_dist to the L2 distance.
+ * Returns the index of the best match, or -1 if the database is empty. */
+int face_db_find(const face_db_t *db,
+                 const float     *embedding,
+                 float           *out_dist);
+
+/* Find the closest registered face and also report the runner-up distance.
+ * out_second_dist is set to 9999 when the database has fewer than 2 entries.
+ * The second distance lets callers reject ambiguous nearest-neighbour matches. */
+int face_db_find_best_two(const face_db_t *db,
+                          const float     *embedding,
+                          float           *out_best_dist,
+                          float           *out_second_dist);
+
+/* Print a summary of all registered entries to stdout. */
+void face_db_print(const face_db_t *db);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FACE_DB_H */

@@ -1,0 +1,44 @@
+{
+  "evaluation_date": "2026-08-12",
+  "device": "Luckfox RV1106",
+  "model": "best_rknpu_rv1106_int8.rknn",
+  "model_sha256": "605c384ed18517ccb1c8e71fc2ed7156de1e5a21a2b9c29e22e01c4e3d6ac9af",
+  "test_archive_sha256": "9ab42cca0ceaa4c2b9604a3a040e757389547612609dbb7e9213f2ae162584a9",
+  "images": 353,
+  "ground_truth_faces": 872,
+  "preprocessing": "letterbox 640x640, padding 114, BGR to RGB",
+  "pytorch_fp32_same_test_evaluation": {
+    "source_commit": "915bbf294bb74c859f0b41f1c23bc395014ea679",
+    "precision_at_best_f1": 0.99625729,
+    "recall_at_best_f1": 0.99311927,
+    "f1": 0.99468581,
+    "map_0_5": 0.99473238,
+    "map_0_5_0_95": 0.91222331
+  },
+  "onnx_fp32_same_test_evaluation": {
+    "precision_at_confidence_0_5": 0.9919447641,
+    "recall_at_confidence_0_5": 0.9885321101,
+    "f1_at_confidence_0_5": 0.9902354968,
+    "true_positive": 862,
+    "false_positive": 7,
+    "false_negative": 10,
+    "map_0_5": 0.9945973753,
+    "map_0_5_0_95": 0.9132191075
+  },
+  "ap_evaluation": {
+    "minimum_confidence": 0.001,
+    "nms_iou": 0.60,
+    "iou_range": "0.50:0.05:0.95",
+    "interpolation_points": 101,
+    "map_0_5": 0.9945378302,
+    "map_0_5_0_95": 0.8924388918
+  },
+  "operating_point_confidence_0_5_iou_0_5": {
+    "true_positive": 861,
+    "false_positive": 7,
+    "false_negative": 11,
+    "precision": 0.9919354839,
+    "recall": 0.9873853211,
+    "f1": 0.9896551724
+  }
+}

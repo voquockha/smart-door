@@ -1,0 +1,7 @@
+path: /tmp/xface-test.LFOjI5
+train: test/images
+val: test/images
+test: test/images
+nc: 1
+names:
+  - Face

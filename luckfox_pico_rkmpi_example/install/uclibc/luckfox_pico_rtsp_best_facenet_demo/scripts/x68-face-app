@@ -1,0 +1,29 @@
+#!/bin/sh
+
+APP_DIR=/root/kha
+APP_BIN="$APP_DIR/luckfox_pico_rtsp_best_facenet"
+ENV_FILE="$APP_DIR/x68_luckfox_env.sh"
+LOG_FILE="$APP_DIR/run.log"
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/oem:/oem/bin:/oem/usr/bin:/oem/sbin:/oem/usr/sbin
+export LD_LIBRARY_PATH=/oem/usr/lib:/oem/lib
+
+cd "$APP_DIR" || exit 1
+
+# Give boot-time networking a short head start. MQTT performs its own retry,
+# so a slow DHCP/DNS response does not prevent the application from starting.
+wait_count=0
+while ! ip route | grep -q '^default ' && [ "$wait_count" -lt 30 ]; do
+    sleep 1
+    wait_count=$((wait_count + 1))
+done
+
+if [ -f "$ENV_FILE" ]; then
+    . "$ENV_FILE"
+fi
+
+exec "$APP_BIN" run \
+    model/best_rknpu_rv1106_int8.rknn \
+    model/facenet.rknn \
+    face_db.bin \
+    model/minifasnet_v2_80x80.rknn >>"$LOG_FILE" 2>&1

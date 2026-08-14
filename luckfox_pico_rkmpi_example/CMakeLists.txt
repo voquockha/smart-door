@@ -117,6 +117,9 @@ message(STATUS "Found libjpeg library: ${JPEG_LIBRARY}")
 
 set(SRC_DIR "${EXAMPLE_DIR}/src")
 file(GLOB SRC_FILES "${SRC_DIR}/*.cc")
+if(${EXAMPLE_NAME} STREQUAL "luckfox_pico_rtsp_best_facenet")
+    list(FILTER SRC_FILES EXCLUDE REGEX "/mqtt_client\\.cc$")
+endif()
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 set_target_properties(${PROJECT_NAME} PROPERTIES
     BUILD_RPATH "$ORIGIN/lib"
